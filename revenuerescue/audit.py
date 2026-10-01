@@ -93,11 +93,129 @@ def fetch(url, timeout=20, tries=3):
     for i in range(tries):
         try:
             r = requests.get(url, headers=UA, timeout=timeout, allow_redirects=True)
-            return r
+            return _maybe_upgrade_fetch(url, r, timeout)
         except Exception as e:
             last = e
             time.sleep(1 + i * 2)
     raise last
+
+
+# --- Scrapling fallback tiers ---------------------------------------------
+# The cheap requests fetch above stays the default path. When it hits a
+# bot-wall (403/captcha) or returns an unrendered JS shell, we try Scrapling's
+# browser fetchers before giving up. Hard rule (AGENTS.md): the fallback only
+# ever upgrades FETCH SUCCESS. If every tier fails we return the ORIGINAL
+# response, so downstream verdict logic (bot-blocked/timeout != broken) is
+# untouched and the fallback can never become a finding or become load-bearing.
+#
+# Env gate: REVENUE_RESCUE_SCRAPLING=0 disables the fallback entirely.
+_SCRAPLING_OK = False
+try:
+    from scrapling import DynamicFetcher, StealthyFetcher
+    _SCRAPLING_OK = True
+except Exception:
+    pass
+
+
+def _scrapling_enabled():
+    import os
+    return _SCRAPLING_OK and os.environ.get("REVENUE_RESCUE_SCRAPLING", "1") != "0"
+
+
+def _looks_like_js_shell(html):
+    """True when a 200 page is an unrendered JS shell: no links, almost no
+    visible text, and tell-tale SPA markers."""
+    if not html or len(html) < 2000:
+        return False
+    low = html.lower()
+    if "<a " in low or "<a>" in low:
+        return False
+    markers = ("enable javascript", "requires javascript", 'id="root"',
+               'id="app"', "__next", "ng-app", "data-reactroot")
+    if not any(m in low for m in markers):
+        return False
+    text = re.sub(r"<script.*?</script>", " ", low, flags=re.S)
+    text = re.sub(r"<style.*?</style>", " ", text, flags=re.S)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return len(" ".join(text.split())) < 400
+
+
+class _ScraplingResponse:
+    """Minimal requests.Response-compatible shim around scrapling page HTML.
+    Only the attributes downstream code reads (status_code/text/content/url)."""
+    def __init__(self, html, tier):
+        self.text = html or ""
+        self.content = self.text.encode("utf-8", "replace")
+        self.status_code = 200
+        self.url = ""
+        self.fetch_tier = tier  # "scrapling-dynamic" | "scrapling-stealthy"
+
+
+def _chrome_executable():
+    """Path to a Chromium binary for scrapling's browser fetchers, if any.
+    Env SCRAPLING_CHROME_PATH wins; then the Playwright browser cache."""
+    import os
+    cand = os.environ.get("SCRAPLING_CHROME_PATH")
+    if cand and Path(cand).exists():
+        return cand
+    cache = Path.home() / ".cache" / "ms-playwright"
+    for pat in ("chromium-*/chrome-linux64/chrome", "chromium-*/chrome-linux/chrome"):
+        for d in sorted(cache.glob(pat), reverse=True):
+            if d.exists():
+                return str(d)
+    return None
+
+
+def _scrapling_fetch(url, timeout=20, order=("dynamic", "stealthy")):
+    """Try scrapling tiers in order; return _ScraplingResponse or None."""
+    exe = _chrome_executable()
+    extra = {"executable_path": exe} if exe else {}
+    for tier in order:
+        try:
+            ms = int(timeout * 1000)
+            if tier == "dynamic":
+                page = DynamicFetcher.fetch(url, timeout=ms, headless=True,
+                                            network_idle=True,
+                                            disable_resources=True, **extra)
+            else:
+                page = StealthyFetcher.fetch(url, timeout=ms, headless=True,
+                                             network_idle=True,
+                                             disable_resources=True, **extra)
+            html = getattr(page, "html_content", "") or ""
+            if html and len(html) > 500:
+                return _ScraplingResponse(html, f"scrapling-{tier}")
+        except Exception as e:
+            sys.stderr.write(f"scrapling {tier} failed for {url}: "
+                             f"{type(e).__name__}\n")
+    return None
+
+
+def _maybe_upgrade_fetch(url, r, timeout):
+    """Try scrapling fallback tiers when the cheap fetch hit a bot-wall or an
+    unrendered JS shell. Never raises; returns the original response when every
+    tier fails (graceful degradation)."""
+    if not _scrapling_enabled():
+        return r
+    try:
+        if r.status_code == 403:
+            trigger = "botwall"
+        elif looks_like_captcha(r.text):
+            trigger = "captcha"
+        elif r.status_code == 200 and _looks_like_js_shell(r.text):
+            trigger = "js-shell"
+        else:
+            return r
+        order = ("stealthy", "dynamic") if trigger in ("botwall", "captcha") \
+            else ("dynamic", "stealthy")
+        upgraded = _scrapling_fetch(url, timeout=timeout, order=order)
+        if upgraded is not None:
+            upgraded.url = getattr(r, "url", url)
+            sys.stderr.write(f"fetch: {upgraded.fetch_tier} upgraded {url} "
+                             f"(trigger={trigger})\n")
+            return upgraded
+    except Exception as e:
+        sys.stderr.write(f"fetch: scrapling fallback errored for {url}: {e}\n")
+    return r
 
 
 def sitemap_urls(base):
