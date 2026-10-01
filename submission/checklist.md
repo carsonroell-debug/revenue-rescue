@@ -14,8 +14,8 @@ STATUS: Nothing has been submitted. Cars must approve before anything is sent.
 - [x] Product website: linkrescue.io (placeholder - confirm the live URL before submitting)
 - [x] Example prompts: submission/example_prompts.md (6 prompts)
 - [x] Icon 512x512: submission/icon_512.png
-- [x] Privacy policy: submission/privacy_policy.md (needs a public URL before submitting)
-- [x] Terms of service: submission/terms_of_service.md (needs a public URL before submitting)
+- [x] Privacy policy: submission/privacy_policy.md - public URL: https://raw.githubusercontent.com/carsonroell-debug/revenue-rescue/main/docs/privacy.md
+- [x] Terms of service: submission/terms_of_service.md - public URL: https://raw.githubusercontent.com/carsonroell-debug/revenue-rescue/main/docs/terms.md
 - [x] Support contact: hello@freedomengineers.tech
 - [x] Company (work) email: hello@freedomengineers.tech
 - [ ] Hosted MCP endpoint URL: NOT READY - the server currently runs locally.
@@ -29,9 +29,15 @@ STATUS: Nothing has been submitted. Cars must approve before anything is sent.
 ## Blocked on Cars:
 1. Approve the listing copy, prompts, privacy policy, and terms as written.
 2. Confirm the product website URL (linkrescue.io?).
-3. Approve public hosting for the endpoint (free tier options exist; needs his OK -
-   Railway is OFF LIMITS per his instruction).
-4. Publish privacy policy + terms at public URLs.
+3. Hosting: PARKED per his 2026-10-01 decision - revisit when the other gates are
+   decided. Fly.io deploy was prepped (Dockerfile, fly.toml pushed) but blocked:
+   his Fly account can't create API tokens (org SSO requirement). Fallback is a
+   Vercel rework (async audits) - his call.
+4. ~~Publish privacy policy + terms at public URLs.~~ DONE 2026-10-01 (raw GitHub URLs above; GitHub Pages pending account provisioning).
+
+## Code
+Public repo: https://github.com/carsonroell-debug/revenue-rescue (personal account;
+transfer to carsonlabs org later if wanted).
 
 ## Known unknowns (from platform research, unchanged):
 - OpenAPI/MCP protocol version requirements, review timelines/SLA, approval
