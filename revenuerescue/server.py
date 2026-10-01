@@ -17,6 +17,7 @@ contract (audit_site / list_audits) is identical on both paths.
 Run:  venv/bin/python -m revenuerescue.server [--port 8787]
 """
 import json
+import os
 import sys
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -187,11 +188,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    port = 8787
+    port = int(os.environ.get("PORT", "8787"))
     for i, a in enumerate(sys.argv):
         if a == "--port" and i + 1 < len(sys.argv):
             port = int(sys.argv[i + 1])
-    srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"Revenue Rescue listening on http://127.0.0.1:{port} "
           f"(REST /api/v1, MCP POST /mcp, OpenAPI /api/v1/openapi.json)", flush=True)
     srv.serve_forever()
