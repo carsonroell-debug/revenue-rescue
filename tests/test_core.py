@@ -8,6 +8,8 @@ os.environ["REVENUE_RESCUE_SCRAPLING"] = "0"
 
 from revenuerescue import audit
 from revenuerescue.adapters.muse import MuseAdapter
+from revenuerescue.commerce import extract_commerce_context
+from revenuerescue.crawler import crawl_pages
 from revenuerescue.evidence import build_finding, tracking_evidence
 from revenuerescue.security import UnsafeTarget, validate_public_http_url
 from revenuerescue.jobs import get_findings as get_job_findings
