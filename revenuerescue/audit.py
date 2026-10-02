@@ -36,6 +36,9 @@ import requests
 import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
 
+from .evidence import build_finding, looks_like_cta
+from .security import UnsafeTarget, safe_get, validate_public_http_url
+
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
       "Accept": "text/html,application/xhtml+xml"}
 
@@ -92,7 +95,8 @@ def fetch(url, timeout=20, tries=3):
     last = None
     for i in range(tries):
         try:
-            r = requests.get(url, headers=UA, timeout=timeout, allow_redirects=True)
+            validate_public_http_url(url)
+            r = safe_get(url, headers=UA, timeout=timeout)
             return _maybe_upgrade_fetch(url, r, timeout)
         except Exception as e:
             last = e
@@ -338,17 +342,44 @@ def main_content(soup):
     return soup.body or soup
 
 
+def _nearest_heading(a):
+    """Best-effort heading context for a link without expensive NLP."""
+    for parent in list(a.parents)[:5]:
+        prev = parent.find_previous(["h1", "h2", "h3", "h4"])
+        if prev:
+            return " ".join(prev.get_text(" ", strip=True).split())[:240]
+    return ""
+
+
+def _link_context(a):
+    parent = a.parent
+    text = ""
+    if parent is not None:
+        text = " ".join(parent.get_text(" ", strip=True).split())
+    return text[:400]
+
+
 def extract_links(page_url, base_host):
+    """Extract outbound links plus monetization context.
+
+    Returns records rather than bare URLs so later evidence can distinguish a
+    random reference from a primary commercial CTA.
+    """
     try:
+        validate_public_http_url(page_url)
         r = fetch(page_url)
+    except UnsafeTarget as e:
+        return [], f"unsafe page target: {e}"
     except Exception as e:
         return [], f"page fetch failed: {type(e).__name__}"
     if r.status_code != 200:
         return [], f"page returned {r.status_code}"
+
     soup = BeautifulSoup(r.text, "html.parser")
     soup = _strip_boilerplate(soup)
     content = main_content(soup)
     links, seen = [], set()
+
     for a in content.find_all("a", href=True):
         h = ihtml.unescape(a["href"]).strip()
         if not h or h.startswith(("#", "tel:", "javascript:")):
@@ -363,8 +394,22 @@ def extract_links(page_url, base_host):
             continue
         if absu in seen:
             continue
+        try:
+            validate_public_http_url(absu)
+        except UnsafeTarget:
+            continue
+
         seen.add(absu)
-        links.append(absu)
+        anchor_text = " ".join(a.get_text(" ", strip=True).split())[:240]
+        classes = " ".join(a.get("class", []))
+        role = a.get("role", "")
+        links.append({
+            "url": absu,
+            "anchor_text": anchor_text,
+            "heading": _nearest_heading(a),
+            "context": _link_context(a),
+            "is_cta": looks_like_cta(anchor_text, classes, role),
+        })
     return links, None
 
 
@@ -372,13 +417,17 @@ def check_link(url, tries=3):
     chain, last_err = [], None
     for i in range(tries):
         try:
-            r = requests.get(url, headers=UA, timeout=20, allow_redirects=True, stream=True)
+            validate_public_http_url(url)
+            r = safe_get(url, headers=UA, timeout=20, stream=True)
             for h in r.history:
                 chain.append({"status": h.status_code, "url": h.url})
             res = {"url": url, "chain": chain, "final_status": r.status_code,
                    "final_url": r.url, "error": None}
             r.close()
             return res
+        except UnsafeTarget:
+            return {"url": url, "chain": [], "final_status": None, "final_url": None,
+                    "error": "unsafe target blocked"}
         except Exception as e:
             last_err = f"{type(e).__name__}"
             chain = []
@@ -467,10 +516,11 @@ def analyze(site_name, base, pages, max_links_per_page=14, progress=None):
         results["pages"].append(pg)
         if err:
             continue
-        aff = [l for l in links if is_affiliate(l)]
-        other = [l for l in links if not is_affiliate(l)]
+        aff = [l for l in links if is_affiliate(l["url"])]
+        other = [l for l in links if not is_affiliate(l["url"])]
         cands = aff + other[: max(0, max_links_per_page - len(aff))]
-        for u in cands[:max_links_per_page]:
+        for link in cands[:max_links_per_page]:
+            u = link["url"]
             if u in checked:
                 continue
             checked.add(u)
@@ -478,6 +528,10 @@ def analyze(site_name, base, pages, max_links_per_page=14, progress=None):
             chk["page"] = page
             chk["is_affiliate"] = is_affiliate(u)
             chk["is_proxy"] = is_proxy(u)
+            chk["anchor_text"] = link.get("anchor_text", "")
+            chk["heading"] = link.get("heading", "")
+            chk["context"] = link.get("context", "")
+            chk["is_cta"] = bool(link.get("is_cta"))
             results["link_checks"].append(chk)
             if progress:
                 progress(chk)
@@ -491,18 +545,20 @@ def findings_for(results):
     for chk in results["link_checks"]:
         v = verdict(chk)
         if v:
-            findings.append({"page": chk["page"], "url": chk["url"],
-                             "finding": v, "hops": len(chk["chain"]),
-                             "final_status": chk["final_status"],
-                             "final_url": chk["final_url"],
-                             "is_affiliate": chk["is_affiliate"]})
-    findings.sort(key=rank)
+            findings.append(build_finding(chk, v))
+    findings.sort(
+        key=lambda item: (
+            -item.get("revenue_risk_score", 0),
+            rank(item),
+        )
+    )
     return findings
 
 
 def run_audit(site_name, base, n_pages=8, work_dir=None):
     """Full pipeline: page discovery -> link extraction -> checks -> verdicts.
     Writes the JSON report into the project work/ dir and returns (report, path)."""
+    validate_public_http_url(base)
     wd = Path(work_dir) if work_dir else WORK_DIR
     wd.mkdir(parents=True, exist_ok=True)
     pages = pick_pages(base, n_pages)
