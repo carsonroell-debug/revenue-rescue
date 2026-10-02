@@ -12,8 +12,8 @@ from revenuerescue.commerce import extract_commerce_context
 from revenuerescue.crawler import crawl_pages
 from revenuerescue.evidence import build_finding, tracking_evidence
 from revenuerescue.security import UnsafeTarget, validate_public_http_url
-from revenuerescue.jobs import get_findings as get_job_findings
-from revenuerescue.monitoring import diff_snapshots, snapshot_from_report
+from revenuerescue.jobs import get_finding, get_findings as get_job_findings
+from revenuerescue.monitoring import diff_snapshots, due_monitors, snapshot_from_report
 from revenuerescue.server import _valid_report_name, openapi_spec
 from revenuerescue import storage
 
@@ -112,6 +112,22 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(finding["issue_type"], "AFFILIATE_TRACKING_MISSING")
         self.assertEqual(finding["severity"], "critical")
         self.assertGreaterEqual(finding["revenue_risk_score"], 92)
+
+
+    def test_finding_id_is_stable(self):
+        chk = {
+            "page": "https://publisher.test/post",
+            "url": "https://merchant.test/item",
+            "final_url": "https://merchant.test/item",
+            "final_status": 404,
+            "chain": [],
+            "is_affiliate": False,
+            "is_cta": True,
+        }
+        first = build_finding(chk, "404 at destination")
+        second = build_finding(chk, "404 at destination")
+        self.assertEqual(first["finding_id"], second["finding_id"])
+        self.assertTrue(first["finding_id"].startswith("rr_"))
 
 
 class CommerceTests(unittest.TestCase):
@@ -267,11 +283,59 @@ class StorageTests(unittest.TestCase):
                 storage._table("unknown")
 
 
+    def test_due_monitor_selection_respects_cadence(self):
+        now = 10_000.0
+        monitors = [
+            {
+                "ok": True,
+                "monitor_id": "00000000-0000-0000-0000-000000000001",
+                "cadence_hours": 1,
+                "last_run_at": now - 7200,
+            },
+            {
+                "ok": True,
+                "monitor_id": "00000000-0000-0000-0000-000000000002",
+                "cadence_hours": 24,
+                "last_run_at": now - 60,
+            },
+        ]
+        with patch("revenuerescue.monitoring.list_state", return_value=monitors):
+            due = due_monitors(now=now)
+        self.assertEqual(len(due), 1)
+        self.assertEqual(
+            due[0]["monitor_id"],
+            "00000000-0000-0000-0000-000000000001",
+        )
+
+
 class JobContractTests(unittest.TestCase):
     def test_nonexistent_job_returns_clean_error(self):
         result = get_job_findings("00000000-0000-0000-0000-000000000000")
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "audit not found")
+
+
+    def test_get_finding_explains_evidence(self):
+        finding = {
+            "finding_id": "rr_abc123",
+            "issue_type": "BROKEN_DESTINATION",
+            "finding": "404 at destination",
+            "severity": "high",
+            "confidence": 0.99,
+            "revenue_risk_score": 95,
+            "recommendation": "Replace the link.",
+            "evidence": {"anchor_text": "Buy now"},
+        }
+        job = {
+            "ok": True,
+            "status": "completed",
+            "findings": [finding],
+        }
+        with patch("revenuerescue.jobs.get_job", return_value=job):
+            result = get_finding("00000000-0000-0000-0000-000000000001", "rr_abc123")
+        self.assertTrue(result["ok"])
+        self.assertIn("404 at destination", result["explanation"])
+        self.assertEqual(result["recommended_action"], "Replace the link.")
 
 
 class ContractTests(unittest.TestCase):

@@ -31,12 +31,14 @@ from starlette.routing import Mount, Route
 
 from .adapters.muse import MuseAdapter
 from .audit import WORK_DIR
-from .jobs import get_findings as get_job_findings
+from .jobs import get_finding, get_findings as get_job_findings
 from .jobs import get_job, start_audit_job
-from .monitoring import create_monitor, get_changes, get_monitor, run_monitor
+from .monitoring import create_monitor, get_changes, get_monitor, run_due_monitors, run_monitor
+from .ops import allow_request, log_event, request_id
 
 ADAPTER = MuseAdapter()
 API_TOKEN = os.environ.get("REVENUE_RESCUE_API_TOKEN", "").strip()
+CRON_SECRET = os.environ.get("REVENUE_RESCUE_CRON_SECRET", "").strip()
 
 
 def _build_mcp() -> FastMCP:
@@ -111,6 +113,14 @@ def _build_mcp() -> FastMCP:
         """Return completed findings, optionally filtered by severity or issue type."""
         try:
             return get_job_findings(audit_id, severity=severity, issue_type=issue_type)
+        except Exception as exc:
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    @server.tool
+    async def explain_finding(audit_id: str, finding_id: str) -> dict:
+        """Explain one Revenue Rescue finding with its evidence and recommended action."""
+        try:
+            return get_finding(audit_id, finding_id)
         except Exception as exc:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
@@ -330,8 +340,21 @@ async def openapi(request: Request) -> JSONResponse:
 
 
 async def audits(request: Request) -> JSONResponse:
+    rid = request.headers.get("x-request-id") or request_id()
+    client = request.client.host if request.client else "unknown"
+    if not allow_request(f"rest:{client}", limit=30, window_seconds=60):
+        log_event("rate_limited", request_id=rid, client=client, path=str(request.url.path))
+        return JSONResponse(
+            {"ok": False, "error": "rate limit exceeded", "request_id": rid},
+            status_code=429,
+            headers={"X-Request-ID": rid, "Retry-After": "60"},
+        )
     if not _bearer_authorized(request):
-        return _auth_error()
+        log_event("unauthorized", request_id=rid, client=client, path=str(request.url.path))
+        response = _auth_error()
+        response.headers["X-Request-ID"] = rid
+        return response
+    log_event("request_started", request_id=rid, client=client, method=request.method, path=str(request.url.path))
 
     if request.method == "GET":
         return JSONResponse(ADAPTER.invoke("list_audits", {}))
@@ -345,7 +368,19 @@ async def audits(request: Request) -> JSONResponse:
         )
 
     out = await asyncio.to_thread(ADAPTER.invoke, "audit_site", body)
-    return JSONResponse(out, status_code=200 if out.get("ok") else 400)
+    log_event(
+        "request_completed",
+        request_id=rid,
+        client=client,
+        method=request.method,
+        path=str(request.url.path),
+        ok=bool(out.get("ok")),
+    )
+    return JSONResponse(
+        {**out, "request_id": rid},
+        status_code=200 if out.get("ok") else 400,
+        headers={"X-Request-ID": rid},
+    )
 
 
 async def audit_report(request: Request) -> JSONResponse:
@@ -362,6 +397,37 @@ async def audit_report(request: Request) -> JSONResponse:
             {"ok": False, "error": "audit report not found"},
             status_code=404,
         )
+
+
+async def cron_due_monitors(request: Request) -> JSONResponse:
+    rid = request.headers.get("x-request-id") or request_id()
+    if not CRON_SECRET:
+        return JSONResponse(
+            {"ok": False, "error": "cron is not configured", "request_id": rid},
+            status_code=503,
+            headers={"X-Request-ID": rid},
+        )
+    header = request.headers.get("authorization", "")
+    supplied = header[7:].strip() if header.lower().startswith("bearer ") else ""
+    if not supplied or not secrets.compare_digest(supplied, CRON_SECRET):
+        log_event("cron_unauthorized", request_id=rid)
+        return JSONResponse(
+            {"ok": False, "error": "unauthorized", "request_id": rid},
+            status_code=401,
+            headers={"X-Request-ID": rid},
+        )
+
+    result = await asyncio.to_thread(run_due_monitors, limit=5)
+    log_event(
+        "cron_due_monitors_completed",
+        request_id=rid,
+        due_count=result.get("due_count"),
+        ran_count=result.get("ran_count"),
+    )
+    return JSONResponse(
+        {**result, "request_id": rid},
+        headers={"X-Request-ID": rid},
+    )
 
 
 async def homepage(_: Request) -> HTMLResponse:
@@ -387,6 +453,7 @@ app = Starlette(
         Route("/api/v1/openapi.json", openapi, methods=["GET"]),
         Route("/api/v1/audits", audits, methods=["GET", "POST"]),
         Route("/api/v1/audits/{report_name}", audit_report, methods=["GET"]),
+        Route("/internal/cron/due-monitors", cron_due_monitors, methods=["POST"]),
         Mount("/", app=MCP_APP),
     ],
     lifespan=MCP_APP.lifespan,

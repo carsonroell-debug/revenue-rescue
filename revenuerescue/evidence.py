@@ -7,6 +7,7 @@ next action. It deliberately does not estimate dollars lost.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from urllib.parse import parse_qs, urlparse
 
@@ -65,6 +66,11 @@ def _classification(finding: str) -> tuple[str, str, float, int, str]:
     return ("REVENUE_RISK", "medium", 0.80, 50, "Review the evidence and verify the destination.")
 
 
+def _finding_id(page: str | None, url: str | None, issue_type: str) -> str:
+    raw = f"{page or ''}|{url or ''}|{issue_type}".encode("utf-8")
+    return "rr_" + hashlib.sha256(raw).hexdigest()[:16]
+
+
 def build_finding(check: dict, finding: str) -> dict:
     issue_type, severity, confidence, score, recommendation = _classification(finding)
     is_affiliate = bool(check.get("is_affiliate"))
@@ -101,6 +107,7 @@ def build_finding(check: dict, finding: str) -> dict:
     evidence.update(tracking_evidence(check.get("url", ""), check.get("final_url")))
 
     return {
+        "finding_id": _finding_id(check.get("page"), check.get("url"), issue_type),
         "issue_type": issue_type,
         "finding": finding,
         "severity": severity,

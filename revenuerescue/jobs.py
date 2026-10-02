@@ -122,3 +122,40 @@ def get_findings(audit_id: str, severity: str | None = None, issue_type: str | N
         "count": len(findings),
         "findings": findings,
     }
+
+
+def get_finding(audit_id: str, finding_id: str) -> dict:
+    """Return one finding with evidence and a concise agent explanation."""
+    job = get_job(audit_id)
+    if not job.get("ok") or job.get("status") != "completed":
+        return job
+    for finding in job.get("findings", []):
+        if finding.get("finding_id") == finding_id:
+            evidence = finding.get("evidence") or {}
+            why = [
+                finding.get("finding", "Confirmed revenue risk."),
+                f"Severity: {finding.get('severity', 'unknown')}.",
+                f"Confidence: {finding.get('confidence', 'unknown')}.",
+                f"Revenue risk score: {finding.get('revenue_risk_score', 'unknown')}/100.",
+            ]
+            if evidence.get("anchor_text"):
+                why.append(f"CTA/link text: {evidence['anchor_text']}.")
+            if evidence.get("dropped_tracking_params"):
+                why.append(
+                    "Dropped tracking parameters: "
+                    + ", ".join(evidence["dropped_tracking_params"])
+                    + "."
+                )
+            return {
+                "ok": True,
+                "audit_id": audit_id,
+                "finding": finding,
+                "explanation": " ".join(why),
+                "recommended_action": finding.get("recommendation"),
+            }
+    return {
+        "ok": False,
+        "audit_id": audit_id,
+        "finding_id": finding_id,
+        "error": "finding not found",
+    }
