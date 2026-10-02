@@ -125,3 +125,27 @@ def list_state(kind: str, *, limit: int = 500) -> list[dict[str, Any]]:
         with conn.cursor() as cur:
             cur.execute(f"select state from {table} order by updated_at desc limit %s", (limit,))
             return [row[0] for row in cur.fetchall()]
+
+
+def storage_health() -> dict:
+    """Check whether the configured state backend is usable."""
+    if not using_postgres():
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            probe = STATE_DIR / ".healthcheck"
+            probe.write_text("ok")
+            probe.unlink(missing_ok=True)
+            return {"ok": True, "backend": "local-json"}
+        except OSError as exc:
+            return {"ok": False, "backend": "local-json", "error": str(exc)}
+
+    try:
+        with psycopg.connect(DATABASE_URL, connect_timeout=3) as conn:
+            with conn.cursor() as cur:
+                cur.execute("select 1")
+                row = cur.fetchone()
+                if not row or row[0] != 1:
+                    return {"ok": False, "backend": "postgres", "error": "unexpected database probe result"}
+        return {"ok": True, "backend": "postgres"}
+    except Exception as exc:
+        return {"ok": False, "backend": "postgres", "error": f"{type(exc).__name__}: {exc}"}
