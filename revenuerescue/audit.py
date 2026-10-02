@@ -36,6 +36,8 @@ import requests
 import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
 
+from .commerce import extract_commerce_context
+from .crawler import crawl_pages_sync
 from .evidence import build_finding, looks_like_cta
 from .security import UnsafeTarget, safe_get, validate_public_http_url
 
@@ -359,23 +361,10 @@ def _link_context(a):
     return text[:400]
 
 
-def extract_links(page_url, base_host):
-    """Extract outbound links plus monetization context.
-
-    Returns records rather than bare URLs so later evidence can distinguish a
-    random reference from a primary commercial CTA.
-    """
-    try:
-        validate_public_http_url(page_url)
-        r = fetch(page_url)
-    except UnsafeTarget as e:
-        return [], f"unsafe page target: {e}"
-    except Exception as e:
-        return [], f"page fetch failed: {type(e).__name__}"
-    if r.status_code != 200:
-        return [], f"page returned {r.status_code}"
-
-    soup = BeautifulSoup(r.text, "html.parser")
+def extract_links_from_html(page_url, base_host, html):
+    """Extract outbound links + monetization context from already-fetched HTML."""
+    soup = BeautifulSoup(html or "", "html.parser")
+    commerce = extract_commerce_context(soup)
     soup = _strip_boilerplate(soup)
     content = main_content(soup)
     links, seen = [], set()
@@ -410,6 +399,21 @@ def extract_links(page_url, base_host):
             "context": _link_context(a),
             "is_cta": looks_like_cta(anchor_text, classes, role),
         })
+    return links, commerce
+
+
+def extract_links(page_url, base_host):
+    """Compatibility path for one-off callers outside the Crawlee batch."""
+    try:
+        validate_public_http_url(page_url)
+        r = fetch(page_url)
+    except UnsafeTarget as e:
+        return [], f"unsafe page target: {e}"
+    except Exception as e:
+        return [], f"page fetch failed: {type(e).__name__}"
+    if r.status_code != 200:
+        return [], f"page returned {r.status_code}"
+    links, _commerce = extract_links_from_html(page_url, base_host, r.text)
     return links, None
 
 
@@ -508,17 +512,82 @@ def rank(f):
 
 def analyze(site_name, base, pages, max_links_per_page=14, progress=None):
     host = urlparse(base).netloc
-    results = {"site": site_name, "base": base, "pages": [], "link_checks": []}
+    results = {
+        "site": site_name,
+        "base": base,
+        "pages": [],
+        "link_checks": [],
+        "crawl_engine": "crawlee",
+    }
     checked = set()
-    for page in pages:
-        links, err = extract_links(page, host)
-        pg = {"page": page, "error": err, "outbound_count": len(links)}
+
+    try:
+        page_results = crawl_pages_sync(
+            pages,
+            fetch,
+            max_concurrency=min(4, max(1, len(pages))),
+            max_tasks_per_minute=90,
+        )
+    except Exception as exc:
+        # Crawlee is an optimization layer, never a correctness dependency.
+        # If orchestration fails, preserve the hardened legacy path.
+        sys.stderr.write(f"crawler: Crawlee fallback to serial mode: {exc}\n")
+        page_results = []
+        results["crawl_engine"] = "serial-fallback"
+        for page in pages:
+            try:
+                response = fetch(page)
+                page_results.append({
+                    "page": page,
+                    "status": response.status_code,
+                    "final_url": getattr(response, "url", page),
+                    "html": response.text,
+                    "fetch_tier": getattr(response, "fetch_tier", "http"),
+                    "error": None,
+                })
+            except Exception as page_exc:
+                page_results.append({
+                    "page": page,
+                    "status": None,
+                    "final_url": None,
+                    "html": "",
+                    "fetch_tier": None,
+                    "error": f"{type(page_exc).__name__}: {page_exc}",
+                })
+
+    for page_result in page_results:
+        page = page_result["page"]
+        err = page_result.get("error")
+        status = page_result.get("status")
+        if not err and status != 200:
+            err = f"page returned {status}"
+
+        links = []
+        commerce = {}
+        if not err:
+            links, commerce = extract_links_from_html(
+                page,
+                host,
+                page_result.get("html", ""),
+            )
+
+        pg = {
+            "page": page,
+            "error": err,
+            "status": status,
+            "final_url": page_result.get("final_url"),
+            "fetch_tier": page_result.get("fetch_tier"),
+            "outbound_count": len(links),
+            "commerce": commerce,
+        }
         results["pages"].append(pg)
         if err:
             continue
+
         aff = [l for l in links if is_affiliate(l["url"])]
-        other = [l for l in links if not is_affiliate(l["url"])]
-        cands = aff + other[: max(0, max_links_per_page - len(aff))]
+        ctas = [l for l in links if l.get("is_cta") and l not in aff]
+        other = [l for l in links if l not in aff and l not in ctas]
+        cands = aff + ctas + other
         for link in cands[:max_links_per_page]:
             u = link["url"]
             if u in checked:
@@ -532,11 +601,11 @@ def analyze(site_name, base, pages, max_links_per_page=14, progress=None):
             chk["heading"] = link.get("heading", "")
             chk["context"] = link.get("context", "")
             chk["is_cta"] = bool(link.get("is_cta"))
+            chk["commerce_context"] = commerce
             results["link_checks"].append(chk)
             if progress:
                 progress(chk)
-            time.sleep(0.3 + random.random() * 0.4)
-        time.sleep(0.5)
+            time.sleep(0.15 + random.random() * 0.2)
     return results
 
 
