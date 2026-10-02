@@ -159,17 +159,35 @@ class _ScraplingResponse:
 
 
 def _chrome_executable():
-    """Path to a Chromium binary for scrapling's browser fetchers, if any.
-    Env SCRAPLING_CHROME_PATH wins; then the Playwright browser cache."""
+    """Locate Chromium for Scrapling/Playwright escalation.
+
+    Explicit SCRAPLING_CHROME_PATH wins. Otherwise search the shared
+    PLAYWRIGHT_BROWSERS_PATH used by the production container, then the normal
+    per-user Playwright cache.
+    """
     import os
+
     cand = os.environ.get("SCRAPLING_CHROME_PATH")
     if cand and Path(cand).exists():
         return cand
-    cache = Path.home() / ".cache" / "ms-playwright"
-    for pat in ("chromium-*/chrome-linux64/chrome", "chromium-*/chrome-linux/chrome"):
-        for d in sorted(cache.glob(pat), reverse=True):
-            if d.exists():
-                return str(d)
+
+    roots = []
+    shared = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if shared:
+        roots.append(Path(shared))
+    roots.append(Path.home() / ".cache" / "ms-playwright")
+
+    patterns = (
+        "chromium-*/chrome-linux64/chrome",
+        "chromium-*/chrome-linux/chrome",
+        "chromium_headless_shell-*/chrome-linux/headless_shell",
+        "chromium_headless_shell-*/chrome-linux64/headless_shell",
+    )
+    for root in roots:
+        for pat in patterns:
+            for binary in sorted(root.glob(pat), reverse=True):
+                if binary.exists():
+                    return str(binary)
     return None
 
 
