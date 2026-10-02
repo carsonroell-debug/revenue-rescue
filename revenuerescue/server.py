@@ -38,6 +38,7 @@ from .jobs import get_finding, get_findings as get_job_findings
 from .jobs import get_job, start_audit_job
 from .monitoring import create_monitor, get_changes, get_monitor, run_due_monitors, run_monitor
 from .ops import allow_request, log_event, request_id
+from .storage import storage_health
 from .validation import ValidationError, validate_tool_args
 
 ADAPTER = MuseAdapter()
@@ -419,6 +420,9 @@ async def health(_: Request) -> JSONResponse:
 
 async def ready(_: Request) -> JSONResponse:
     problems = CONFIG.problems()
+    storage = await asyncio.to_thread(storage_health)
+    if not storage.get("ok"):
+        problems = [*problems, "state backend is unavailable"]
     if problems:
         return JSONResponse(
             {
@@ -426,6 +430,7 @@ async def ready(_: Request) -> JSONResponse:
                 "service": "revenue-rescue",
                 "version": __version__,
                 "config": CONFIG.public_status(),
+                "storage": storage,
             },
             status_code=503,
         )
@@ -435,6 +440,7 @@ async def ready(_: Request) -> JSONResponse:
             "service": "revenue-rescue",
             "version": __version__,
             "config": CONFIG.public_status(),
+            "storage": storage,
         }
     )
 
@@ -459,9 +465,6 @@ async def audits(request: Request) -> JSONResponse:
         response.headers["X-Request-ID"] = rid
         return response
     log_event("request_started", request_id=rid, client=client, method=request.method, path=str(request.url.path))
-
-    if request.method == "GET":
-        return JSONResponse(ADAPTER.invoke("list_audits", {}))
 
     try:
         body = await request.json()
@@ -492,7 +495,7 @@ async def _authorized_json(request: Request) -> tuple[str, str] | JSONResponse:
     client = request.client.host if request.client else "unknown"
     if not allow_request(f"rest:{client}", limit=60, window_seconds=60):
         return JSONResponse(
-            {"ok": False, "error": "rate limit exceeded", "request_id": rid},
+            {**rate_limited(60), "request_id": rid},
             status_code=429,
             headers={"X-Request-ID": rid, "Retry-After": "60"},
         )
@@ -648,7 +651,7 @@ async def cron_due_monitors(request: Request) -> JSONResponse:
     rid = request.headers.get("x-request-id") or request_id()
     if not CRON_SECRET:
         return JSONResponse(
-            {"ok": False, "error": "cron is not configured", "request_id": rid},
+            {**not_ready(["cron is not configured"]), "request_id": rid},
             status_code=503,
             headers={"X-Request-ID": rid},
         )
@@ -678,12 +681,13 @@ async def cron_due_monitors(request: Request) -> JSONResponse:
 async def homepage(_: Request) -> HTMLResponse:
     return HTMLResponse(
         "<html><body><h1>Revenue Rescue</h1>"
-        "<p>Agent-native revenue leak auditing.</p>"
+        "<p>Agent-native commerce observability.</p>"
         "<ul>"
         "<li>MCP: <code>/mcp</code></li>"
-        "<li>REST: <code>/api/v1/audits</code></li>"
+        "<li>REST: <code>/api/v1</code></li>"
         "<li>OpenAPI: <code>/api/v1/openapi.json</code></li>"
-        "<li>Health: <code>/health</code></li>"
+        "<li>Liveness: <code>/health</code></li>"
+        "<li>Readiness: <code>/ready</code></li>"
         "</ul></body></html>"
     )
 
