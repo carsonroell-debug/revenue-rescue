@@ -1,45 +1,75 @@
-# Revenue Rescue - Submission Checklist (PREPARED, NOT SUBMITTED)
+# Revenue Rescue — Connector Readiness Checklist
 
-Submission route (verified live 2026-10-01): https://muse.ai/platform
-Flow: 1) Describe your product -> 2) Submit for review -> 3) Appear in the
-directory. Review covers functional, security, and legal requirements plus
-end-to-end testing. No public SLA; 1,500+ applications were already in the
-queue as of Meta Connect (Sept 23, 2026).
+Status: **prepared, not submitted**.
 
-STATUS: Nothing has been submitted. Cars must approve before anything is sent.
+This checklist intentionally separates product readiness from platform-specific
+submission details. Platform requirements can change; verify the current
+official connector/developer documentation immediately before submission.
 
-## Per the submission form (community-documented fields), current readiness:
+## Product readiness
 
-- [x] Connector name: "Revenue Rescue"
-- [x] Product website: linkrescue.io (placeholder - confirm the live URL before submitting)
-- [x] Example prompts: submission/example_prompts.md (6 prompts)
-- [x] Icon 512x512: submission/icon_512.png
-- [x] Privacy policy: submission/privacy_policy.md - public URL: https://raw.githubusercontent.com/carsonroell-debug/revenue-rescue/main/docs/privacy.md
-- [x] Terms of service: submission/terms_of_service.md - public URL: https://raw.githubusercontent.com/carsonroell-debug/revenue-rescue/main/docs/terms.md
-- [x] Support contact: hello@freedomengineers.tech
-- [x] Company (work) email: hello@freedomengineers.tech
-- [ ] Hosted MCP endpoint URL: NOT READY - the server currently runs locally.
-      Needs public hosting (free tier) before the "Existing MCP" path can be used.
-- [ ] API URL + docs URL: the OpenAPI spec exists at /api/v1/openapi.json, but
-      also needs a public base URL for the "Raw API" path.
-- [x] Access requirements: documented in listing_copy.md
-- [x] Auth methods: none required (documented); per-user API key planned for volume use
-- [x] Accepts payments toggle: No (connector itself is free)
+- [x] Connector/product name: Revenue Rescue
+- [x] MCP endpoint implementation
+- [x] REST + OpenAPI implementation
+- [x] Canonical tool contracts shared across adapters
+- [x] Background audits
+- [x] Evidence-backed findings
+- [x] Stable finding IDs + explanations
+- [x] Persistent monitoring + change detection
+- [x] SSRF protections
+- [x] Optional bearer authentication
+- [x] Rate limiting
+- [x] Structured logs/request IDs
+- [x] Durable Postgres/Supabase-ready persistence
+- [x] Cron-safe due-monitor execution
+- [x] CI/regression suite
+- [x] Benchmark/truth-set tooling
+- [ ] Public production endpoint deployed
+- [ ] Production database attached
+- [ ] Production API + cron secrets configured
+- [ ] 20–30 site benchmark completed
+- [ ] Precision target met on reviewed truth set
+- [ ] End-to-end connector dogfood completed
 
-## Blocked on Cars:
-1. Approve the listing copy, prompts, privacy policy, and terms as written.
-2. Confirm the product website URL (linkrescue.io?).
-3. Hosting: PARKED per his 2026-10-01 decision - revisit when the other gates are
-   decided. Fly.io deploy was prepped (Dockerfile, fly.toml pushed) but blocked:
-   his Fly account can't create API tokens (org SSO requirement). Fallback is a
-   Vercel rework (async audits) - his call.
-4. ~~Publish privacy policy + terms at public URLs.~~ DONE 2026-10-01 (raw GitHub URLs above; GitHub Pages pending account provisioning).
+## Listing assets
 
-## Code
-Public repo: https://github.com/carsonroell-debug/revenue-rescue (personal account;
-transfer to carsonlabs org later if wanted).
+- [x] Draft listing copy: `submission/listing_copy.md`
+- [x] Example prompts: `submission/example_prompts.md`
+- [x] Draft privacy policy: `submission/privacy_policy.md`
+- [x] Draft terms: `submission/terms_of_service.md`
+- [x] 512px icon asset
+- [ ] Confirm final product website URL
+- [ ] Publish privacy policy at stable public product URL
+- [ ] Publish terms at stable public product URL
+- [ ] Confirm support contact
+- [ ] Verify current platform-required fields/auth requirements
+- [ ] Verify current submission/review process from official documentation
 
-## Known unknowns (from platform research, unchanged):
-- OpenAPI/MCP protocol version requirements, review timelines/SLA, approval
-  criteria detail, developer security/PII rules, monetization/fee terms,
-  connector ranking logic, "Muse Connector Terms" legal text.
+## Technical endpoints to verify after deployment
+
+- `/mcp`
+- `/api/v1/openapi.json`
+- `/api/v1/jobs`
+- `/api/v1/jobs/{audit_id}`
+- `/api/v1/jobs/{audit_id}/findings`
+- `/api/v1/jobs/{audit_id}/findings/{finding_id}`
+- `/api/v1/monitors`
+- `/api/v1/monitors/{monitor_id}`
+- `/api/v1/monitors/{monitor_id}/run`
+- `/api/v1/monitors/{monitor_id}/changes`
+- `/health`
+
+## Submission gate
+
+Do not submit merely because the endpoint is technically reachable.
+
+Submit when all of these are true:
+
+1. hosted endpoint is stable;
+2. auth and rate limits are configured;
+3. privacy/terms URLs are stable;
+4. real-site benchmark precision is strong;
+5. natural-language agent testing reliably selects the correct Revenue Rescue
+   tool;
+6. monitor/create/run/change workflows work end to end;
+7. current platform submission requirements have been re-verified.
