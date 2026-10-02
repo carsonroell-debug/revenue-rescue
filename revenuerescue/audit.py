@@ -39,6 +39,7 @@ from bs4 import BeautifulSoup
 from .commerce import extract_commerce_context
 from .crawler import crawl_pages_sync
 from .evidence import build_finding, looks_like_cta
+from .intelligence import discontinued_offer, dropped_tracking_params, page_priority
 from .security import UnsafeTarget, safe_get, validate_public_http_url
 
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
@@ -287,30 +288,32 @@ def websearch_review_urls(base, n=8):
 
 
 def pick_pages(base, n=8):
+    """Prioritize likely monetized pages from the sitemap.
+
+    Commercial relevance wins over simple sitemap ordering. Last-modified is
+    only a tie-breaker so we spend a small crawl budget on pages most likely to
+    contain revenue paths.
+    """
     urls = sitemap_urls(base)
     if not urls:
-        # slow/unreachable WordPress sitemap -> web-search fallback
         return websearch_review_urls(base, n) or []
-    hinted, rest = [], []
+
+    candidates = []
     for loc, lm in urls:
         low = loc.lower()
-        if any(x in low for x in ["/tag/", "/category/", "/author/", "/page/",
+        if any(x in low for x in ["/tag/", "/author/", "/page/",
                                  "/product-tag", "/product_cat", "#"]):
             continue
         if "sitemap" in low:
             continue
+        score = page_priority(loc)
         if any(h in low for h in REVIEW_HINTS):
-            hinted.append((lm or "9999", loc))
-        else:
-            rest.append((lm or "9999", loc))
-    hinted.sort()
-    rest.sort()
-    pages = [loc for _, loc in hinted[:n]]
-    if len(pages) < n:
-        pages += [loc for _, loc in rest[: n - len(pages)]]
-    if not pages:
-        pages = websearch_review_urls(base, n)
-    return pages
+            score += 8
+        candidates.append((score, lm or "", loc))
+
+    candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
+    pages = [loc for _, _, loc in candidates[:n]]
+    return pages or websearch_review_urls(base, n)
 
 
 def _strip_boilerplate(soup):
@@ -492,6 +495,15 @@ def verdict(chk, body_sniff=None):
         return f"long redirect chain ({hops} hops)"
     if is_proxy(chk["url"]):
         return None  # proxy attaches tag server-side; attribution unverifiable
+
+    # Direct affiliate URLs that visibly carry tracking parameters should not
+    # silently lose them across redirects. This is lower-confidence than a
+    # missing tag at the source, so it gets its own issue type.
+    if is_affiliate(chk["url"]):
+        dropped = dropped_tracking_params(chk["url"], chk.get("final_url"))
+        if dropped:
+            return "affiliate tracking parameter dropped after redirect (" + ", ".join(dropped) + ")"
+
     if AMAZON_RE.search(chk["url"]):
         q = parse_qs(orig.query)
         if "tag" not in q and "amzn.to" not in chk["url"]:
@@ -611,10 +623,38 @@ def analyze(site_name, base, pages, max_links_per_page=14, progress=None):
 
 def findings_for(results):
     findings = []
+
     for chk in results["link_checks"]:
         v = verdict(chk)
         if v:
             findings.append(build_finding(chk, v))
+
+    # Structured Product/Offer data is page-level evidence. Only explicit
+    # schema.org Discontinued is elevated; temporary OutOfStock/SoldOut states
+    # remain context rather than confirmed leaks.
+    for page in results.get("pages", []):
+        commerce = page.get("commerce") or {}
+        discontinued = discontinued_offer(commerce)
+        if not discontinued:
+            continue
+        chk = {
+            "page": page.get("page"),
+            "url": discontinued.get("url") or page.get("page"),
+            "final_url": discontinued.get("url") or page.get("page"),
+            "final_status": page.get("status"),
+            "chain": [],
+            "is_affiliate": False,
+            "is_cta": False,
+            "anchor_text": "",
+            "heading": "",
+            "context": "",
+            "commerce_context": commerce,
+        }
+        findings.append(build_finding(chk, "structured offer marked discontinued"))
+
+    # Deduplicate stable finding IDs in case multiple evidence paths converge.
+    deduped = {item["finding_id"]: item for item in findings}
+    findings = list(deduped.values())
     findings.sort(
         key=lambda item: (
             -item.get("revenue_risk_score", 0),
