@@ -8,6 +8,8 @@ os.environ["REVENUE_RESCUE_SCRAPLING"] = "0"
 
 from revenuerescue import audit
 from revenuerescue.adapters.muse import MuseAdapter
+from revenuerescue.evidence import build_finding, tracking_evidence
+from revenuerescue.security import UnsafeTarget, validate_public_http_url
 from revenuerescue.server import _valid_report_name, openapi_spec
 
 
@@ -61,6 +63,50 @@ class VerdictTests(unittest.TestCase):
             "error": None,
         }
         self.assertIn("soft 404", audit.verdict(chk))
+
+
+class SecurityTests(unittest.TestCase):
+    def test_blocks_loopback(self):
+        with self.assertRaises(UnsafeTarget):
+            validate_public_http_url("http://127.0.0.1/admin")
+
+    def test_blocks_private_ip(self):
+        with self.assertRaises(UnsafeTarget):
+            validate_public_http_url("http://10.0.0.8/internal")
+
+    def test_blocks_non_http_scheme(self):
+        with self.assertRaises(UnsafeTarget):
+            validate_public_http_url("file:///etc/passwd")
+
+
+class EvidenceTests(unittest.TestCase):
+    def test_tracking_diff_reports_dropped_params(self):
+        evidence = tracking_evidence(
+            "https://merchant.test/product?tag=cars-20&x=1",
+            "https://merchant.test/product?x=1",
+        )
+        self.assertEqual(evidence["dropped_tracking_params"], ["tag"])
+
+    def test_affiliate_cta_increases_risk(self):
+        chk = {
+            "page": "https://publisher.test/best-widget",
+            "url": "https://amazon.com/dp/ABC",
+            "final_url": "https://amazon.com/dp/ABC",
+            "final_status": 200,
+            "chain": [],
+            "is_affiliate": True,
+            "is_cta": True,
+            "anchor_text": "Buy now",
+            "heading": "Our top pick",
+            "context": "Our top pick Buy now",
+        }
+        finding = build_finding(
+            chk,
+            "missing affiliate tracking parameter (no tag= - earns nothing)",
+        )
+        self.assertEqual(finding["issue_type"], "AFFILIATE_TRACKING_MISSING")
+        self.assertEqual(finding["severity"], "critical")
+        self.assertGreaterEqual(finding["revenue_risk_score"], 92)
 
 
 class ContractTests(unittest.TestCase):
