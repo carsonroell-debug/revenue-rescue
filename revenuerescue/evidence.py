@@ -9,19 +9,14 @@ from __future__ import annotations
 
 import hashlib
 import re
-from urllib.parse import parse_qs, urlparse
+
+from .intelligence import dropped_tracking_params, tracking_params
 
 CTA_RE = re.compile(
     r"\b(buy|shop|order|purchase|book|subscribe|sign[ -]?up|get started|"
     r"start free|view deal|see deal|check price|see price|claim|download)\b",
     re.I,
 )
-
-TRACKING_KEYS = {
-    "tag", "aff", "affid", "aff_id", "affiliate", "affiliate_id",
-    "ref", "refid", "ref_id", "partner", "partner_id", "campid",
-    "campaign", "subid", "sub_id", "clickid", "click_id",
-}
 
 
 def looks_like_cta(anchor_text: str = "", class_text: str = "", role: str = "") -> bool:
@@ -33,15 +28,10 @@ def looks_like_cta(anchor_text: str = "", class_text: str = "", role: str = "") 
     )
 
 
-def _tracking_params(url: str) -> dict[str, list[str]]:
-    qs = parse_qs(urlparse(url).query)
-    return {k: v for k, v in qs.items() if k.lower() in TRACKING_KEYS}
-
-
 def tracking_evidence(original_url: str, final_url: str | None) -> dict:
-    original = _tracking_params(original_url)
-    final = _tracking_params(final_url or "")
-    dropped = sorted(k for k in original if k not in final)
+    original = tracking_params(original_url)
+    final = tracking_params(final_url or "")
+    dropped = dropped_tracking_params(original_url, final_url)
     return {
         "original_tracking_params": sorted(original),
         "final_tracking_params": sorted(final),
@@ -59,8 +49,30 @@ def _classification(finding: str) -> tuple[str, str, float, int, str]:
         return ("PRODUCT_DESTINATION_GONE", "high", 0.93, 84, "Replace the destination with the current product or offer page.")
     if "redirect chain" in low:
         return ("REDIRECT_CHAIN", "medium", 0.96, 52, "Link directly to the final healthy destination when attribution allows.")
+    if "tracking parameter dropped" in low:
+        return (
+            "AFFILIATE_TRACKING_DROPPED",
+            "high",
+            0.88,
+            86,
+            "Verify attribution through the redirect; regenerate or replace the URL if the parameter should persist.",
+        )
     if "tracking" in low:
-        return ("AFFILIATE_TRACKING_MISSING", "high", 0.98, 90, "Regenerate or replace the affiliate URL and verify attribution.")
+        return (
+            "AFFILIATE_TRACKING_MISSING",
+            "high",
+            0.98,
+            90,
+            "Regenerate or replace the affiliate URL and verify attribution.",
+        )
+    if "structured offer marked discontinued" in low:
+        return (
+            "OFFER_DISCONTINUED",
+            "high",
+            0.98,
+            84,
+            "Update or remove the discontinued offer and its monetization path.",
+        )
     if "homepage" in low:
         return ("DESTINATION_CHANGED", "high", 0.90, 76, "Verify the intended landing page and replace the stale URL.")
     return ("REVENUE_RISK", "medium", 0.80, 50, "Review the evidence and verify the destination.")
