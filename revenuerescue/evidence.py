@@ -1,0 +1,110 @@
+"""Evidence-first Revenue Rescue finding model.
+
+The scanner should prove deterministic web failures and let the agent explain
+them. This module enriches a confirmed verdict with machine-readable issue
+type, severity, confidence, revenue-risk score, source context, and a concrete
+next action. It deliberately does not estimate dollars lost.
+"""
+from __future__ import annotations
+
+import re
+from urllib.parse import parse_qs, urlparse
+
+CTA_RE = re.compile(
+    r"\b(buy|shop|order|purchase|book|subscribe|sign[ -]?up|get started|"
+    r"start free|view deal|see deal|check price|see price|claim|download)\b",
+    re.I,
+)
+
+TRACKING_KEYS = {
+    "tag", "aff", "affid", "aff_id", "affiliate", "affiliate_id",
+    "ref", "refid", "ref_id", "partner", "partner_id", "campid",
+    "campaign", "subid", "sub_id", "clickid", "click_id",
+}
+
+
+def looks_like_cta(anchor_text: str = "", class_text: str = "", role: str = "") -> bool:
+    joined = f"{anchor_text} {class_text} {role}".strip()
+    return bool(
+        CTA_RE.search(joined)
+        or re.search(r"\b(btn|button|cta)\b", class_text or "", re.I)
+        or (role or "").lower() == "button"
+    )
+
+
+def _tracking_params(url: str) -> dict[str, list[str]]:
+    qs = parse_qs(urlparse(url).query)
+    return {k: v for k, v in qs.items() if k.lower() in TRACKING_KEYS}
+
+
+def tracking_evidence(original_url: str, final_url: str | None) -> dict:
+    original = _tracking_params(original_url)
+    final = _tracking_params(final_url or "")
+    dropped = sorted(k for k in original if k not in final)
+    return {
+        "original_tracking_params": sorted(original),
+        "final_tracking_params": sorted(final),
+        "dropped_tracking_params": dropped,
+    }
+
+
+def _classification(finding: str) -> tuple[str, str, float, int, str]:
+    low = finding.lower()
+    if "404" in low or "410" in low:
+        return ("BROKEN_DESTINATION", "high", 0.99, 88, "Replace or remove the dead destination.")
+    if "server error" in low:
+        return ("DESTINATION_SERVER_ERROR", "high", 0.95, 78, "Verify the merchant destination and replace it if the failure persists.")
+    if "soft 404" in low or "appears gone" in low:
+        return ("PRODUCT_DESTINATION_GONE", "high", 0.93, 84, "Replace the destination with the current product or offer page.")
+    if "redirect chain" in low:
+        return ("REDIRECT_CHAIN", "medium", 0.96, 52, "Link directly to the final healthy destination when attribution allows.")
+    if "tracking" in low:
+        return ("AFFILIATE_TRACKING_MISSING", "high", 0.98, 90, "Regenerate or replace the affiliate URL and verify attribution.")
+    if "homepage" in low:
+        return ("DESTINATION_CHANGED", "high", 0.90, 76, "Verify the intended landing page and replace the stale URL.")
+    return ("REVENUE_RISK", "medium", 0.80, 50, "Review the evidence and verify the destination.")
+
+
+def build_finding(check: dict, finding: str) -> dict:
+    issue_type, severity, confidence, score, recommendation = _classification(finding)
+    is_affiliate = bool(check.get("is_affiliate"))
+    is_cta = bool(check.get("is_cta"))
+
+    if is_affiliate:
+        score += 5
+    if is_cta:
+        score += 7
+    score = min(100, score)
+
+    if score >= 92:
+        severity = "critical"
+    elif score >= 72 and severity == "medium":
+        severity = "high"
+
+    evidence = {
+        "final_status": check.get("final_status"),
+        "redirect_hops": len(check.get("chain", [])),
+        "redirect_chain": check.get("chain", []),
+        "final_url": check.get("final_url"),
+        "anchor_text": check.get("anchor_text", ""),
+        "heading": check.get("heading", ""),
+        "context": check.get("context", ""),
+        "is_affiliate": is_affiliate,
+        "is_cta": is_cta,
+    }
+    evidence.update(tracking_evidence(check.get("url", ""), check.get("final_url")))
+
+    return {
+        "issue_type": issue_type,
+        "finding": finding,
+        "severity": severity,
+        "confidence": confidence,
+        "revenue_risk_score": score,
+        "page": check.get("page"),
+        "url": check.get("url"),
+        "final_url": check.get("final_url"),
+        "is_affiliate": is_affiliate,
+        "is_cta": is_cta,
+        "evidence": evidence,
+        "recommendation": recommendation,
+    }
