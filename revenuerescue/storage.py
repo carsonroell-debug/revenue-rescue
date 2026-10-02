@@ -103,3 +103,25 @@ def delete_state(kind: str, key: str) -> bool:
         with conn.cursor() as cur:
             cur.execute(f"delete from {table} where id = %s::uuid", (key,))
             return cur.rowcount > 0
+
+
+def list_state(kind: str, *, limit: int = 500) -> list[dict[str, Any]]:
+    """List stored state objects for one supported kind, newest first."""
+    limit = max(1, min(1000, int(limit)))
+    if not using_postgres():
+        folder = STATE_DIR / "".join(ch for ch in kind.lower() if ch.isalnum() or ch in "_-")
+        if not folder.exists():
+            return []
+        rows = []
+        for path in sorted(folder.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:limit]:
+            try:
+                rows.append(json.loads(path.read_text()))
+            except (OSError, json.JSONDecodeError):
+                continue
+        return rows
+
+    table = _table(kind)
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"select state from {table} order by updated_at desc limit %s", (limit,))
+            return [row[0] for row in cur.fetchall()]
