@@ -30,16 +30,21 @@ from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Mount, Route
 
 from .adapters.muse import MuseAdapter
+from .config import assert_startup_ready, load_config
+from .errors import invalid_input, not_found, not_ready, rate_limited, unauthorized
+from .version import __version__
 from .audit import WORK_DIR
 from .jobs import get_finding, get_findings as get_job_findings
 from .jobs import get_job, start_audit_job
 from .monitoring import create_monitor, get_changes, get_monitor, run_due_monitors, run_monitor
 from .ops import allow_request, log_event, request_id
+from .storage import storage_health
 from .validation import ValidationError, validate_tool_args
 
 ADAPTER = MuseAdapter()
-API_TOKEN = os.environ.get("REVENUE_RESCUE_API_TOKEN", "").strip()
-CRON_SECRET = os.environ.get("REVENUE_RESCUE_CRON_SECRET", "").strip()
+CONFIG = assert_startup_ready(load_config())
+API_TOKEN = CONFIG.api_token
+CRON_SECRET = CONFIG.cron_secret
 
 
 def _build_mcp() -> FastMCP:
@@ -197,21 +202,6 @@ def _build_mcp() -> FastMCP:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     @server.tool
-    async def list_audits() -> dict:
-        """List recent Revenue Rescue audit reports available on this server."""
-        return ADAPTER.invoke("list_audits", {})
-
-    @server.tool
-    async def get_audit(report_name: str) -> dict:
-        """Load one previously completed audit report by its report filename."""
-        try:
-            return {"ok": True, "report": _load_report(report_name)}
-        except ValueError as exc:
-            return {"ok": False, "error": str(exc)}
-        except FileNotFoundError:
-            return {"ok": False, "error": "audit report not found"}
-
-    @server.tool
     async def health_check() -> dict:
         """Check whether Revenue Rescue is online and ready for tool calls."""
         return {
@@ -222,19 +212,6 @@ def _build_mcp() -> FastMCP:
         }
 
     return server
-
-
-def _valid_report_name(name: str) -> bool:
-    return bool(re.fullmatch(r"[a-z0-9][a-z0-9.\-_]*\.json", name, re.I))
-
-
-def _load_report(name: str) -> dict:
-    if not _valid_report_name(name):
-        raise ValueError("invalid report filename")
-    path = Path(WORK_DIR) / name
-    if not path.exists():
-        raise FileNotFoundError(name)
-    return json.loads(path.read_text())
 
 
 def _bearer_authorized(request: Request) -> bool:
@@ -249,7 +226,7 @@ def _bearer_authorized(request: Request) -> bool:
 
 def _auth_error() -> JSONResponse:
     return JSONResponse(
-        {"ok": False, "error": "unauthorized"},
+        unauthorized(),
         status_code=401,
         headers={"WWW-Authenticate": "Bearer"},
     )
@@ -272,7 +249,7 @@ def openapi_spec(server_url: str) -> dict:
         "openapi": "3.0.3",
         "info": {
             "title": "Revenue Rescue",
-            "version": "0.3.0",
+            "version": __version__,
             "description": (
                 "Agent-native commerce observability: audits, evidence-backed "
                 "findings, explanations, persistent monitors, and change detection."
@@ -433,10 +410,37 @@ async def health(_: Request) -> JSONResponse:
         {
             "ok": True,
             "service": "revenue-rescue",
-            "version": "0.2.0",
+            "version": __version__,
             "mcp": "/mcp",
-            "rest": "/api/v1/audits",
+            "rest": "/api/v1",
             "auth_enabled": bool(API_TOKEN),
+        }
+    )
+
+
+async def ready(_: Request) -> JSONResponse:
+    problems = CONFIG.problems()
+    storage = await asyncio.to_thread(storage_health)
+    if not storage.get("ok"):
+        problems = [*problems, "state backend is unavailable"]
+    if problems:
+        return JSONResponse(
+            {
+                **not_ready(problems),
+                "service": "revenue-rescue",
+                "version": __version__,
+                "config": CONFIG.public_status(),
+                "storage": storage,
+            },
+            status_code=503,
+        )
+    return JSONResponse(
+        {
+            "ok": True,
+            "service": "revenue-rescue",
+            "version": __version__,
+            "config": CONFIG.public_status(),
+            "storage": storage,
         }
     )
 
@@ -451,7 +455,7 @@ async def audits(request: Request) -> JSONResponse:
     if not allow_request(f"rest:{client}", limit=30, window_seconds=60):
         log_event("rate_limited", request_id=rid, client=client, path=str(request.url.path))
         return JSONResponse(
-            {"ok": False, "error": "rate limit exceeded", "request_id": rid},
+            {**rate_limited(60), "request_id": rid},
             status_code=429,
             headers={"X-Request-ID": rid, "Retry-After": "60"},
         )
@@ -462,14 +466,11 @@ async def audits(request: Request) -> JSONResponse:
         return response
     log_event("request_started", request_id=rid, client=client, method=request.method, path=str(request.url.path))
 
-    if request.method == "GET":
-        return JSONResponse(ADAPTER.invoke("list_audits", {}))
-
     try:
         body = await request.json()
     except Exception:
         return JSONResponse(
-            {"ok": False, "error": "request body must be valid JSON"},
+            invalid_input("request body must be valid JSON"),
             status_code=400,
         )
 
@@ -489,28 +490,12 @@ async def audits(request: Request) -> JSONResponse:
     )
 
 
-async def audit_report(request: Request) -> JSONResponse:
-    if not _bearer_authorized(request):
-        return _auth_error()
-
-    name = request.path_params["report_name"]
-    try:
-        return JSONResponse({"ok": True, "report": _load_report(name)})
-    except ValueError as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-    except FileNotFoundError:
-        return JSONResponse(
-            {"ok": False, "error": "audit report not found"},
-            status_code=404,
-        )
-
-
 async def _authorized_json(request: Request) -> tuple[str, str] | JSONResponse:
     rid = request.headers.get("x-request-id") or request_id()
     client = request.client.host if request.client else "unknown"
     if not allow_request(f"rest:{client}", limit=60, window_seconds=60):
         return JSONResponse(
-            {"ok": False, "error": "rate limit exceeded", "request_id": rid},
+            {**rate_limited(60), "request_id": rid},
             status_code=429,
             headers={"X-Request-ID": rid, "Retry-After": "60"},
         )
@@ -535,7 +520,7 @@ async def jobs_collection(request: Request) -> JSONResponse:
             max_pages=body["max_pages"],
         )
     except Exception as exc:
-        out = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        out = invalid_input(str(exc))
     return JSONResponse({**out, "request_id": rid}, status_code=200 if out.get("ok") else 400)
 
 
@@ -545,7 +530,12 @@ async def job_detail(request: Request) -> JSONResponse:
         return auth
     rid, _client = auth
     out = get_job(request.path_params["audit_id"])
-    return JSONResponse({**out, "request_id": rid}, status_code=200 if out.get("ok") else 404)
+    if out.get("ok"):
+        return JSONResponse({**out, "request_id": rid})
+    return JSONResponse(
+        {**not_found("audit", request.path_params["audit_id"]), "request_id": rid},
+        status_code=404,
+    )
 
 
 async def job_findings(request: Request) -> JSONResponse:
@@ -558,7 +548,12 @@ async def job_findings(request: Request) -> JSONResponse:
         severity=request.query_params.get("severity"),
         issue_type=request.query_params.get("issue_type"),
     )
-    return JSONResponse({**out, "request_id": rid}, status_code=200 if out.get("ok") else 404)
+    if out.get("ok"):
+        return JSONResponse({**out, "request_id": rid})
+    return JSONResponse(
+        {**not_found("audit", request.path_params["audit_id"]), "request_id": rid},
+        status_code=404,
+    )
 
 
 async def finding_detail(request: Request) -> JSONResponse:
@@ -570,7 +565,15 @@ async def finding_detail(request: Request) -> JSONResponse:
         request.path_params["audit_id"],
         request.path_params["finding_id"],
     )
-    return JSONResponse({**out, "request_id": rid}, status_code=200 if out.get("ok") else 404)
+    if out.get("ok"):
+        return JSONResponse({**out, "request_id": rid})
+    return JSONResponse(
+        {
+            **not_found("finding", request.path_params["finding_id"]),
+            "request_id": rid,
+        },
+        status_code=404,
+    )
 
 
 async def monitors_collection(request: Request) -> JSONResponse:
@@ -588,7 +591,7 @@ async def monitors_collection(request: Request) -> JSONResponse:
             cadence_hours=body["cadence_hours"],
         )
     except Exception as exc:
-        out = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        out = invalid_input(str(exc))
     return JSONResponse({**out, "request_id": rid}, status_code=200 if out.get("ok") else 400)
 
 
@@ -599,7 +602,10 @@ async def monitor_detail(request: Request) -> JSONResponse:
     rid, _client = auth
     monitor = get_monitor(request.path_params["monitor_id"])
     if not monitor.get("ok"):
-        return JSONResponse({**monitor, "request_id": rid}, status_code=404)
+        return JSONResponse(
+            {**not_found("monitor", request.path_params["monitor_id"]), "request_id": rid},
+            status_code=404,
+        )
     out = {
         "ok": True,
         "monitor_id": monitor.get("monitor_id"),
@@ -619,7 +625,12 @@ async def monitor_run(request: Request) -> JSONResponse:
         return auth
     rid, _client = auth
     out = await asyncio.to_thread(run_monitor, request.path_params["monitor_id"])
-    return JSONResponse({**out, "request_id": rid}, status_code=200 if out.get("ok") else 404)
+    if out.get("ok"):
+        return JSONResponse({**out, "request_id": rid})
+    return JSONResponse(
+        {**not_found("monitor", request.path_params["monitor_id"]), "request_id": rid},
+        status_code=404,
+    )
 
 
 async def monitor_changes(request: Request) -> JSONResponse:
@@ -628,14 +639,19 @@ async def monitor_changes(request: Request) -> JSONResponse:
         return auth
     rid, _client = auth
     out = get_changes(request.path_params["monitor_id"])
-    return JSONResponse({**out, "request_id": rid}, status_code=200 if out.get("ok") else 404)
+    if out.get("ok"):
+        return JSONResponse({**out, "request_id": rid})
+    return JSONResponse(
+        {**not_found("monitor", request.path_params["monitor_id"]), "request_id": rid},
+        status_code=404,
+    )
 
 
 async def cron_due_monitors(request: Request) -> JSONResponse:
     rid = request.headers.get("x-request-id") or request_id()
     if not CRON_SECRET:
         return JSONResponse(
-            {"ok": False, "error": "cron is not configured", "request_id": rid},
+            {**not_ready(["cron is not configured"]), "request_id": rid},
             status_code=503,
             headers={"X-Request-ID": rid},
         )
@@ -644,7 +660,7 @@ async def cron_due_monitors(request: Request) -> JSONResponse:
     if not supplied or not secrets.compare_digest(supplied, CRON_SECRET):
         log_event("cron_unauthorized", request_id=rid)
         return JSONResponse(
-            {"ok": False, "error": "unauthorized", "request_id": rid},
+            {**unauthorized(), "request_id": rid},
             status_code=401,
             headers={"X-Request-ID": rid},
         )
@@ -665,12 +681,13 @@ async def cron_due_monitors(request: Request) -> JSONResponse:
 async def homepage(_: Request) -> HTMLResponse:
     return HTMLResponse(
         "<html><body><h1>Revenue Rescue</h1>"
-        "<p>Agent-native revenue leak auditing.</p>"
+        "<p>Agent-native commerce observability.</p>"
         "<ul>"
         "<li>MCP: <code>/mcp</code></li>"
-        "<li>REST: <code>/api/v1/audits</code></li>"
+        "<li>REST: <code>/api/v1</code></li>"
         "<li>OpenAPI: <code>/api/v1/openapi.json</code></li>"
-        "<li>Health: <code>/health</code></li>"
+        "<li>Liveness: <code>/health</code></li>"
+        "<li>Readiness: <code>/ready</code></li>"
         "</ul></body></html>"
     )
 
@@ -682,9 +699,9 @@ app = Starlette(
     routes=[
         Route("/", homepage, methods=["GET"]),
         Route("/health", health, methods=["GET"]),
+        Route("/ready", ready, methods=["GET"]),
         Route("/api/v1/openapi.json", openapi, methods=["GET"]),
-        Route("/api/v1/audits", audits, methods=["GET", "POST"]),
-        Route("/api/v1/audits/{report_name}", audit_report, methods=["GET"]),
+        Route("/api/v1/audits", audits, methods=["POST"]),
         Route("/api/v1/jobs", jobs_collection, methods=["POST"]),
         Route("/api/v1/jobs/{audit_id}", job_detail, methods=["GET"]),
         Route("/api/v1/jobs/{audit_id}/findings", job_findings, methods=["GET"]),
@@ -703,8 +720,7 @@ app = Starlette(
 def main() -> None:
     import uvicorn
 
-    port = int(os.environ.get("PORT", "8787"))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=CONFIG.port)
 
 
 if __name__ == "__main__":

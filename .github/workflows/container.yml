@@ -1,0 +1,26 @@
+name: Container
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production image
+        run: docker build --pull --tag revenue-rescue:ci .
+      - name: Verify non-root runtime
+        run: |
+          uid="$(docker run --rm --entrypoint id revenue-rescue:ci -u)"
+          test "$uid" != "0"
+      - name: Import production service in container
+        run: |
+          docker run --rm             -e REVENUE_RESCUE_ENV=test             -e REVENUE_RESCUE_SCRAPLING=0             --entrypoint python             revenue-rescue:ci             -c "from revenuerescue.server import app; from revenuerescue.version import __version__; print(__version__, type(app).__name__)"

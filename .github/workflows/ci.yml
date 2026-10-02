@@ -30,3 +30,8 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Import production ASGI app
         run: python -c "from revenuerescue.server import app, MCP; print(type(app).__name__, MCP.name)"
+      - name: Release preflight
+        env:
+          REVENUE_RESCUE_ENV: test
+          REVENUE_RESCUE_SCRAPLING: "0"
+        run: python scripts/release_check.py
