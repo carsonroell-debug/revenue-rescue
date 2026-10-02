@@ -8,6 +8,8 @@ os.environ["REVENUE_RESCUE_SCRAPLING"] = "0"
 
 from revenuerescue import audit
 from revenuerescue.adapters.muse import MuseAdapter
+from revenuerescue.adapters.openai import OpenAIAdapter
+from revenuerescue.contracts import TOOLS
 from revenuerescue.commerce import extract_commerce_context
 from revenuerescue.crawler import crawl_pages
 from revenuerescue.evidence import build_finding, tracking_evidence
@@ -413,6 +415,33 @@ class JobContractTests(unittest.TestCase):
 
 
 class ContractTests(unittest.TestCase):
+    def test_platform_adapters_share_same_tool_names(self):
+        canonical = [tool["name"] for tool in TOOLS]
+        muse = [tool["name"] for tool in MuseAdapter().describe()["tools"]]
+        openai = [fn["name"] for fn in OpenAIAdapter().describe()["functions"]]
+        self.assertEqual(muse, canonical)
+        self.assertEqual(openai, canonical)
+
+    def test_openapi_exposes_modern_operations(self):
+        spec = openapi_spec("https://revenue-rescue.example/")
+        operation_ids = {
+            operation["operationId"]
+            for path in spec["paths"].values()
+            for operation in path.values()
+            if isinstance(operation, dict) and "operationId" in operation
+        }
+        self.assertTrue({
+            "startAudit",
+            "getAuditStatus",
+            "getFindings",
+            "explainFinding",
+            "createMonitor",
+            "getMonitorStatus",
+            "runMonitorNow",
+            "getMonitorChanges",
+        }.issubset(operation_ids))
+
+
     def test_muse_contract_has_required_fields(self):
         desc = MuseAdapter().describe()
         audit_tool = next(t for t in desc["tools"] if t["name"] == "audit_site")
