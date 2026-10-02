@@ -1,8 +1,12 @@
-# Revenue Rescue - Example Prompts (DRAFT, for the submission form)
+# Revenue Rescue — Example Prompts
 
-1. "Check the-gadgeteer.com for places where it is losing revenue."
-2. "Audit my site for dead affiliate links and tell me which pages they are on."
-3. "Are any of my Amazon links missing their tracking tag?"
-4. "Scan majorhifi.com and rank the worst revenue leaks first."
-5. "Which of my review pages link to products that no longer exist?"
-6. "Give me a leak snapshot for my top 8 review pages."
+1. "Audit my website for confirmed revenue risks."
+2. "Start a Revenue Rescue audit of example.com and tell me when it finishes."
+3. "Show me only the critical and high-risk findings."
+4. "Explain finding rr_1234abcd and tell me what evidence supports it."
+5. "Check whether any affiliate tracking disappears after redirects."
+6. "Monitor my website every day for revenue-impacting changes."
+7. "Run my Revenue Rescue monitor now."
+8. "What changed on my site since the last Revenue Rescue scan?"
+9. "Did any product destination become discontinued or start redirecting somewhere else?"
+10. "Which current finding should I investigate first, and why?"
