@@ -19,6 +19,7 @@ from revenuerescue.jobs import get_finding, get_findings as get_job_findings
 from revenuerescue.monitoring import diff_snapshots, due_monitors, snapshot_from_report
 from revenuerescue.server import _valid_report_name, openapi_spec
 from revenuerescue import storage
+from revenuerescue.validation import ValidationError, validate_tool_args
 
 
 class VerdictTests(unittest.TestCase):
@@ -412,6 +413,38 @@ class JobContractTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertIn("404 at destination", result["explanation"])
         self.assertEqual(result["recommended_action"], "Replace the link.")
+
+
+class ValidationTests(unittest.TestCase):
+    def test_defaults_and_normalizes_audit_args(self):
+        args = validate_tool_args("start_audit", {
+            "site_name": "Example",
+            "base_url": "https://example.com",
+        })
+        self.assertEqual(args["max_pages"], 8)
+
+    def test_rejects_non_http_url(self):
+        with self.assertRaises(ValidationError):
+            validate_tool_args("start_audit", {
+                "site_name": "Example",
+                "base_url": "file:///etc/passwd",
+            })
+
+    def test_rejects_out_of_range_page_count(self):
+        with self.assertRaises(ValidationError):
+            validate_tool_args("start_audit", {
+                "site_name": "Example",
+                "base_url": "https://example.com",
+                "max_pages": 5000,
+            })
+
+    def test_rejects_unexpected_fields(self):
+        with self.assertRaises(ValidationError):
+            validate_tool_args("monitor_site", {
+                "site_name": "Example",
+                "base_url": "https://example.com",
+                "admin_token": "secret",
+            })
 
 
 class ContractTests(unittest.TestCase):
