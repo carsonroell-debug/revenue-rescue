@@ -10,6 +10,7 @@ from revenuerescue import audit
 from revenuerescue.adapters.muse import MuseAdapter
 from revenuerescue.evidence import build_finding, tracking_evidence
 from revenuerescue.security import UnsafeTarget, validate_public_http_url
+from revenuerescue.jobs import get_findings as get_job_findings
 from revenuerescue.server import _valid_report_name, openapi_spec
 
 
@@ -107,6 +108,13 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(finding["issue_type"], "AFFILIATE_TRACKING_MISSING")
         self.assertEqual(finding["severity"], "critical")
         self.assertGreaterEqual(finding["revenue_risk_score"], 92)
+
+
+class JobContractTests(unittest.TestCase):
+    def test_nonexistent_job_returns_clean_error(self):
+        result = get_job_findings("00000000-0000-0000-0000-000000000000")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "audit not found")
 
 
 class ContractTests(unittest.TestCase):
