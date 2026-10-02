@@ -31,6 +31,7 @@ from starlette.routing import Mount, Route
 
 from .adapters.muse import MuseAdapter
 from .config import assert_startup_ready, load_config
+from .errors import invalid_input, not_found, not_ready, rate_limited, unauthorized
 from .version import __version__
 from .audit import WORK_DIR
 from .jobs import get_finding, get_findings as get_job_findings
@@ -224,7 +225,7 @@ def _bearer_authorized(request: Request) -> bool:
 
 def _auth_error() -> JSONResponse:
     return JSONResponse(
-        {"ok": False, "error": "unauthorized"},
+        unauthorized(),
         status_code=401,
         headers={"WWW-Authenticate": "Bearer"},
     )
@@ -418,14 +419,24 @@ async def health(_: Request) -> JSONResponse:
 
 async def ready(_: Request) -> JSONResponse:
     problems = CONFIG.problems()
-    payload = {
-        "ok": not problems,
-        "service": "revenue-rescue",
-        "version": __version__,
-        "config": CONFIG.public_status(),
-        "problems": problems,
-    }
-    return JSONResponse(payload, status_code=200 if not problems else 503)
+    if problems:
+        return JSONResponse(
+            {
+                **not_ready(problems),
+                "service": "revenue-rescue",
+                "version": __version__,
+                "config": CONFIG.public_status(),
+            },
+            status_code=503,
+        )
+    return JSONResponse(
+        {
+            "ok": True,
+            "service": "revenue-rescue",
+            "version": __version__,
+            "config": CONFIG.public_status(),
+        }
+    )
 
 
 async def openapi(request: Request) -> JSONResponse:
@@ -438,7 +449,7 @@ async def audits(request: Request) -> JSONResponse:
     if not allow_request(f"rest:{client}", limit=30, window_seconds=60):
         log_event("rate_limited", request_id=rid, client=client, path=str(request.url.path))
         return JSONResponse(
-            {"ok": False, "error": "rate limit exceeded", "request_id": rid},
+            {**rate_limited(60), "request_id": rid},
             status_code=429,
             headers={"X-Request-ID": rid, "Retry-After": "60"},
         )
@@ -456,7 +467,7 @@ async def audits(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:
         return JSONResponse(
-            {"ok": False, "error": "request body must be valid JSON"},
+            invalid_input("request body must be valid JSON"),
             status_code=400,
         )
 
@@ -506,7 +517,7 @@ async def jobs_collection(request: Request) -> JSONResponse:
             max_pages=body["max_pages"],
         )
     except Exception as exc:
-        out = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        out = invalid_input(str(exc))
     return JSONResponse({**out, "request_id": rid}, status_code=200 if out.get("ok") else 400)
 
 
@@ -516,7 +527,12 @@ async def job_detail(request: Request) -> JSONResponse:
         return auth
     rid, _client = auth
     out = get_job(request.path_params["audit_id"])
-    return JSONResponse({**out, "request_id": rid}, status_code=200 if out.get("ok") else 404)
+    if out.get("ok"):
+        return JSONResponse({**out, "request_id": rid})
+    return JSONResponse(
+        {**not_found("audit", request.path_params["audit_id"]), "request_id": rid},
+        status_code=404,
+    )
 
 
 async def job_findings(request: Request) -> JSONResponse:
@@ -529,7 +545,12 @@ async def job_findings(request: Request) -> JSONResponse:
         severity=request.query_params.get("severity"),
         issue_type=request.query_params.get("issue_type"),
     )
-    return JSONResponse({**out, "request_id": rid}, status_code=200 if out.get("ok") else 404)
+    if out.get("ok"):
+        return JSONResponse({**out, "request_id": rid})
+    return JSONResponse(
+        {**not_found("audit", request.path_params["audit_id"]), "request_id": rid},
+        status_code=404,
+    )
 
 
 async def finding_detail(request: Request) -> JSONResponse:
@@ -541,7 +562,15 @@ async def finding_detail(request: Request) -> JSONResponse:
         request.path_params["audit_id"],
         request.path_params["finding_id"],
     )
-    return JSONResponse({**out, "request_id": rid}, status_code=200 if out.get("ok") else 404)
+    if out.get("ok"):
+        return JSONResponse({**out, "request_id": rid})
+    return JSONResponse(
+        {
+            **not_found("finding", request.path_params["finding_id"]),
+            "request_id": rid,
+        },
+        status_code=404,
+    )
 
 
 async def monitors_collection(request: Request) -> JSONResponse:
@@ -559,7 +588,7 @@ async def monitors_collection(request: Request) -> JSONResponse:
             cadence_hours=body["cadence_hours"],
         )
     except Exception as exc:
-        out = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        out = invalid_input(str(exc))
     return JSONResponse({**out, "request_id": rid}, status_code=200 if out.get("ok") else 400)
 
 
@@ -570,7 +599,10 @@ async def monitor_detail(request: Request) -> JSONResponse:
     rid, _client = auth
     monitor = get_monitor(request.path_params["monitor_id"])
     if not monitor.get("ok"):
-        return JSONResponse({**monitor, "request_id": rid}, status_code=404)
+        return JSONResponse(
+            {**not_found("monitor", request.path_params["monitor_id"]), "request_id": rid},
+            status_code=404,
+        )
     out = {
         "ok": True,
         "monitor_id": monitor.get("monitor_id"),
@@ -590,7 +622,12 @@ async def monitor_run(request: Request) -> JSONResponse:
         return auth
     rid, _client = auth
     out = await asyncio.to_thread(run_monitor, request.path_params["monitor_id"])
-    return JSONResponse({**out, "request_id": rid}, status_code=200 if out.get("ok") else 404)
+    if out.get("ok"):
+        return JSONResponse({**out, "request_id": rid})
+    return JSONResponse(
+        {**not_found("monitor", request.path_params["monitor_id"]), "request_id": rid},
+        status_code=404,
+    )
 
 
 async def monitor_changes(request: Request) -> JSONResponse:
@@ -599,7 +636,12 @@ async def monitor_changes(request: Request) -> JSONResponse:
         return auth
     rid, _client = auth
     out = get_changes(request.path_params["monitor_id"])
-    return JSONResponse({**out, "request_id": rid}, status_code=200 if out.get("ok") else 404)
+    if out.get("ok"):
+        return JSONResponse({**out, "request_id": rid})
+    return JSONResponse(
+        {**not_found("monitor", request.path_params["monitor_id"]), "request_id": rid},
+        status_code=404,
+    )
 
 
 async def cron_due_monitors(request: Request) -> JSONResponse:
@@ -615,7 +657,7 @@ async def cron_due_monitors(request: Request) -> JSONResponse:
     if not supplied or not secrets.compare_digest(supplied, CRON_SECRET):
         log_event("cron_unauthorized", request_id=rid)
         return JSONResponse(
-            {"ok": False, "error": "unauthorized", "request_id": rid},
+            {**unauthorized(), "request_id": rid},
             status_code=401,
             headers={"X-Request-ID": rid},
         )
