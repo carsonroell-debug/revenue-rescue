@@ -69,11 +69,16 @@ def build_finding(check: dict, finding: str) -> dict:
     issue_type, severity, confidence, score, recommendation = _classification(finding)
     is_affiliate = bool(check.get("is_affiliate"))
     is_cta = bool(check.get("is_cta"))
+    commerce = check.get("commerce_context") or {}
 
     if is_affiliate:
         score += 5
     if is_cta:
         score += 7
+    if commerce.get("has_product_schema"):
+        score += 4
+    if commerce.get("has_offer_schema"):
+        score += 4
     score = min(100, score)
 
     if score >= 92:
@@ -91,6 +96,7 @@ def build_finding(check: dict, finding: str) -> dict:
         "context": check.get("context", ""),
         "is_affiliate": is_affiliate,
         "is_cta": is_cta,
+        "commerce": commerce,
     }
     evidence.update(tracking_evidence(check.get("url", ""), check.get("final_url")))
 
