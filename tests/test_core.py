@@ -110,6 +110,60 @@ class EvidenceTests(unittest.TestCase):
         self.assertGreaterEqual(finding["revenue_risk_score"], 92)
 
 
+class CommerceTests(unittest.TestCase):
+    def test_extracts_product_offer_jsonld(self):
+        from bs4 import BeautifulSoup
+
+        html = """
+        <html><head>
+          <script type="application/ld+json">
+          {
+            "@context":"https://schema.org",
+            "@type":"Product",
+            "name":"Widget Pro",
+            "sku":"WP-1",
+            "offers":{
+              "@type":"Offer",
+              "price":"499.00",
+              "priceCurrency":"CAD",
+              "availability":"https://schema.org/InStock"
+            }
+          }
+          </script>
+        </head><body></body></html>
+        """
+        ctx = extract_commerce_context(BeautifulSoup(html, "html.parser"))
+        self.assertTrue(ctx["has_product_schema"])
+        self.assertTrue(ctx["has_offer_schema"])
+        self.assertEqual(ctx["products"][0]["name"], "Widget Pro")
+        self.assertEqual(ctx["offers"][0]["price"], "499.00")
+
+
+class CrawleeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_crawlee_orchestrates_injected_fetcher_without_network_fetch(self):
+        class FakeResponse:
+            status_code = 200
+            url = "https://example.com/a"
+            text = "<html><body><a href='https://merchant.test/x'>Buy</a></body></html>"
+
+        def fake_fetch(url):
+            response = FakeResponse()
+            response.url = url
+            return response
+
+        with patch("revenuerescue.crawler.validate_public_http_url", return_value="ok"):
+            rows = await crawl_pages(
+                ["https://example.com/a", "https://example.com/b"],
+                fake_fetch,
+                max_concurrency=2,
+                max_tasks_per_minute=1000,
+            )
+
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row["status"] == 200 for row in rows))
+        self.assertTrue(all(row["error"] is None for row in rows))
+
+
 class JobContractTests(unittest.TestCase):
     def test_nonexistent_job_returns_clean_error(self):
         result = get_job_findings("00000000-0000-0000-0000-000000000000")
