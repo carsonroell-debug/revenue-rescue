@@ -31,6 +31,8 @@ from starlette.routing import Mount, Route
 
 from .adapters.muse import MuseAdapter
 from .audit import WORK_DIR
+from .jobs import get_findings as get_job_findings
+from .jobs import get_job, start_audit_job
 
 ADAPTER = MuseAdapter()
 API_TOKEN = os.environ.get("REVENUE_RESCUE_API_TOKEN", "").strip()
@@ -78,6 +80,38 @@ def _build_mcp() -> FastMCP:
             "max_pages": max_pages,
         }
         return await asyncio.to_thread(ADAPTER.invoke, "audit_site", args)
+
+    @server.tool
+    async def start_audit(
+        site_name: str,
+        base_url: str,
+        max_pages: int = 8,
+    ) -> dict:
+        """Start a background revenue-leak audit and return an audit_id immediately."""
+        try:
+            return start_audit_job(site_name, base_url, max_pages=max_pages)
+        except Exception as exc:
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    @server.tool
+    async def get_audit_status(audit_id: str) -> dict:
+        """Check whether a background audit is queued, running, completed, or failed."""
+        try:
+            return get_job(audit_id)
+        except Exception as exc:
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    @server.tool
+    async def get_findings(
+        audit_id: str,
+        severity: str | None = None,
+        issue_type: str | None = None,
+    ) -> dict:
+        """Return completed findings, optionally filtered by severity or issue type."""
+        try:
+            return get_job_findings(audit_id, severity=severity, issue_type=issue_type)
+        except Exception as exc:
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     @server.tool
     async def list_audits() -> dict:
