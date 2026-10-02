@@ -236,6 +236,16 @@ class CommerceTests(unittest.TestCase):
         self.assertEqual(findings[0]["issue_type"], "OFFER_DISCONTINUED")
 
 
+class RuntimeTests(unittest.TestCase):
+    def test_chrome_discovery_uses_shared_playwright_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "chromium-123" / "chrome-linux64" / "chrome"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("")
+            with patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": tmp}, clear=False):
+                self.assertEqual(audit._chrome_executable(), str(binary))
+
+
 class CrawleeTests(unittest.IsolatedAsyncioTestCase):
     async def test_crawlee_orchestrates_injected_fetcher_without_network_fetch(self):
         class FakeResponse:
