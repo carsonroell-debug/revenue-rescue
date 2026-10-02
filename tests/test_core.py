@@ -11,6 +11,7 @@ from revenuerescue.adapters.muse import MuseAdapter
 from revenuerescue.commerce import extract_commerce_context
 from revenuerescue.crawler import crawl_pages
 from revenuerescue.evidence import build_finding, tracking_evidence
+from revenuerescue.intelligence import discontinued_offer, page_priority
 from revenuerescue.security import UnsafeTarget, validate_public_http_url
 from revenuerescue.jobs import get_finding, get_findings as get_job_findings
 from revenuerescue.monitoring import diff_snapshots, due_monitors, snapshot_from_report
@@ -68,6 +69,28 @@ class VerdictTests(unittest.TestCase):
             "error": None,
         }
         self.assertIn("soft 404", audit.verdict(chk))
+
+
+    def test_direct_affiliate_tracking_drop_is_flagged(self):
+        chk = {
+            "url": "https://amazon.com/dp/ABC?tag=cars-20",
+            "chain": [{"status": 301, "url": "https://amazon.com/dp/ABC?tag=cars-20"}],
+            "final_status": 200,
+            "final_url": "https://amazon.com/dp/ABC",
+            "error": None,
+        }
+        result = audit.verdict(chk)
+        self.assertIn("tracking parameter dropped", result)
+
+    def test_proxy_tracking_drop_remains_inconclusive(self):
+        chk = {
+            "url": "https://geni.us/widget?tag=cars-20",
+            "chain": [{"status": 302, "url": "https://geni.us/widget?tag=cars-20"}],
+            "final_status": 200,
+            "final_url": "https://amazon.com/dp/ABC",
+            "error": None,
+        }
+        self.assertIsNone(audit.verdict(chk))
 
 
 class SecurityTests(unittest.TestCase):
@@ -130,6 +153,33 @@ class EvidenceTests(unittest.TestCase):
         self.assertTrue(first["finding_id"].startswith("rr_"))
 
 
+class IntelligenceTests(unittest.TestCase):
+    def test_commercial_pages_rank_above_low_value_pages(self):
+        best = page_priority("https://example.com/best-running-shoes")
+        privacy = page_priority("https://example.com/privacy-policy")
+        self.assertGreater(best, privacy)
+
+    def test_pick_pages_prioritizes_commercial_urls(self):
+        sitemap = [
+            ("https://example.com/privacy-policy", "2026-10-01"),
+            ("https://example.com/best-running-shoes", "2025-01-01"),
+            ("https://example.com/about", "2026-10-01"),
+        ]
+        with patch.object(audit, "sitemap_urls", return_value=sitemap):
+            pages = audit.pick_pages("https://example.com", 1)
+        self.assertEqual(pages, ["https://example.com/best-running-shoes"])
+
+    def test_discontinued_is_actionable_but_out_of_stock_is_not(self):
+        discontinued = {
+            "offers": [{"availability": "https://schema.org/Discontinued", "price": "99"}]
+        }
+        temporary = {
+            "offers": [{"availability": "https://schema.org/OutOfStock", "price": "99"}]
+        }
+        self.assertIsNotNone(discontinued_offer(discontinued))
+        self.assertIsNone(discontinued_offer(temporary))
+
+
 class CommerceTests(unittest.TestCase):
     def test_extracts_product_offer_jsonld(self):
         from bs4 import BeautifulSoup
@@ -157,6 +207,30 @@ class CommerceTests(unittest.TestCase):
         self.assertTrue(ctx["has_offer_schema"])
         self.assertEqual(ctx["products"][0]["name"], "Widget Pro")
         self.assertEqual(ctx["offers"][0]["price"], "499.00")
+
+
+    def test_findings_for_adds_discontinued_offer(self):
+        results = {
+            "link_checks": [],
+            "pages": [{
+                "page": "https://shop.test/widget",
+                "status": 200,
+                "commerce": {
+                    "has_product_schema": True,
+                    "has_offer_schema": True,
+                    "products": [{"name": "Widget"}],
+                    "offers": [{
+                        "availability": "https://schema.org/Discontinued",
+                        "price": "99",
+                        "currency": "CAD",
+                        "url": "https://shop.test/widget",
+                    }],
+                },
+            }],
+        }
+        findings = audit.findings_for(results)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["issue_type"], "OFFER_DISCONTINUED")
 
 
 class CrawleeTests(unittest.IsolatedAsyncioTestCase):
