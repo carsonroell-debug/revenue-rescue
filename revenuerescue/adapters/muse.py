@@ -1,88 +1,50 @@
-"""Muse connector adapter.
+"""Muse-shaped adapter over Revenue Rescue's canonical contracts.
 
-Maps Muse's tool invocations onto the audit engine. Per the platform research,
-Muse connectors are submitted as either a hosted MCP endpoint ("Existing MCP")
-or a raw API + OpenAPI spec ("Raw API"). This adapter defines the canonical
-tool contract used by BOTH ingestion paths:
-
-  tool name : audit_site
-  args      : { site_name: str, base_url: str, max_pages?: int (1-12, default 8) }
-
-The MCP server (revenuerescue/mcp_server.py) and the REST API
-(revenuerescue/server.py) both delegate to this adapter, so the tool contract
-stays identical regardless of which submission path Meta reviews.
-
-Muse-specific notes (from platform research, Sept 2026):
-- No auth is required for a first self-test; production directory listing
-  should gate abuse with a per-user API key (Secure Credentials Store flow).
-- Idempotent, narrow tools with typed fields and human-readable errors,
-  per community best practice.
+This adapter intentionally contains no platform-specific product logic.
+Contracts live in revenuerescue.contracts; execution delegates to the same
+jobs/monitoring services used by MCP and REST.
 """
 from . import AgentAdapter
 from ..audit import run_audit
+from ..contracts import TOOLS
+from ..jobs import get_finding, get_findings, get_job, start_audit_job
+from ..monitoring import create_monitor, get_changes, get_monitor, run_monitor
+from ..validation import ValidationError, validate_tool_args
 
 
 class MuseAdapter(AgentAdapter):
     platform = "muse"
 
-    TOOLS = [
-        {
-            "name": "audit_site",
-            "description": (
-                "Audit a publisher website for revenue leaks: dead affiliate "
-                "links, missing tracking parameters, and soft-404 product "
-                "redirects. Returns confirmed findings only; bot-blocked or "
-                "timeout results are reported as inconclusive, never as leaks."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "site_name": {
-                        "type": "string",
-                        "description": "Human-readable site name, e.g. 'The Gadgeteer'",
-                    },
-                    "base_url": {
-                        "type": "string",
-                        "description": "Site root URL, e.g. 'https://the-gadgeteer.com'",
-                    },
-                    "max_pages": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 12,
-                        "default": 8,
-                        "description": "How many review pages to scan",
-                    },
-                },
-                "required": ["site_name", "base_url"],
-            },
-        },
-        {
-            "name": "list_audits",
-            "description": "List recent Revenue Rescue audit reports on this server.",
-            "input_schema": {"type": "object", "properties": {}},
-        },
-    ]
+    TOOLS = TOOLS
 
     def describe(self):
         return {
             "platform": self.platform,
             "connector_name": "Revenue Rescue",
             "tools": self.TOOLS,
-            "auth": "none required for local self-test; API key in production",
+            "auth": "bearer token supported in production",
             "example_prompts": [
-                "Check my site for places where I am losing revenue",
-                "Audit the-gadgeteer.com for dead affiliate links",
-                "Are any of my Amazon links missing their tracking tag?",
+                "Check my site for confirmed revenue risks",
+                "Start an audit of my website and tell me when it finishes",
+                "Explain the highest-risk finding",
+                "Monitor this site daily and tell me what changes",
             ],
         }
 
     def invoke(self, tool, args):
+        try:
+            args = validate_tool_args(tool, args)
+        except KeyError:
+            return {"ok": False, "error": f"unknown tool: {tool}"}
+        except ValidationError as exc:
+            return {"ok": False, "error": str(exc)}
+
         if tool == "audit_site":
             site_name = args.get("site_name")
             base_url = args.get("base_url")
             if not site_name or not base_url:
                 return {"ok": False, "error": "site_name and base_url are required"}
-            max_pages = max(1, min(12, int(args.get("max_pages", 8))))
+            max_pages = max(1, min(50, int(args.get("max_pages", 8))))
             report, path = run_audit(site_name, base_url, n_pages=max_pages)
             return {
                 "ok": True,
@@ -95,9 +57,57 @@ class MuseAdapter(AgentAdapter):
                 },
                 "report_path": path,
             }
-        if tool == "list_audits":
-            from pathlib import Path
-            from ..audit import WORK_DIR
-            files = sorted(Path(WORK_DIR).glob("*.json"), reverse=True)[:20]
-            return {"ok": True, "audits": [f.name for f in files]}
+
+        if tool == "start_audit":
+            return start_audit_job(
+                args.get("site_name"),
+                args.get("base_url"),
+                max_pages=args.get("max_pages", 8),
+            )
+
+        if tool == "get_audit_status":
+            return get_job(args.get("audit_id", ""))
+
+        if tool == "get_findings":
+            return get_findings(
+                args.get("audit_id", ""),
+                severity=args.get("severity"),
+                issue_type=args.get("issue_type"),
+            )
+
+        if tool == "explain_finding":
+            return get_finding(
+                args.get("audit_id", ""),
+                args.get("finding_id", ""),
+            )
+
+        if tool == "monitor_site":
+            return create_monitor(
+                args.get("site_name"),
+                args.get("base_url"),
+                max_pages=args.get("max_pages", 8),
+                cadence_hours=args.get("cadence_hours", 24),
+            )
+
+        if tool == "run_monitor_now":
+            return run_monitor(args.get("monitor_id", ""))
+
+        if tool == "get_monitor_status":
+            monitor = get_monitor(args.get("monitor_id", ""))
+            if not monitor.get("ok"):
+                return monitor
+            return {
+                "ok": True,
+                "monitor_id": monitor.get("monitor_id"),
+                "site_name": monitor.get("site_name"),
+                "base_url": monitor.get("base_url"),
+                "cadence_hours": monitor.get("cadence_hours"),
+                "last_run_at": monitor.get("last_run_at"),
+                "has_baseline": monitor.get("baseline") is not None,
+                "last_change_count": len(monitor.get("last_changes", [])),
+            }
+
+        if tool == "get_monitor_changes":
+            return get_changes(args.get("monitor_id", ""))
+
         return {"ok": False, "error": f"unknown tool: {tool}"}

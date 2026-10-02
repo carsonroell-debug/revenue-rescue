@@ -35,6 +35,7 @@ from .jobs import get_finding, get_findings as get_job_findings
 from .jobs import get_job, start_audit_job
 from .monitoring import create_monitor, get_changes, get_monitor, run_due_monitors, run_monitor
 from .ops import allow_request, log_event, request_id
+from .validation import ValidationError, validate_tool_args
 
 ADAPTER = MuseAdapter()
 API_TOKEN = os.environ.get("REVENUE_RESCUE_API_TOKEN", "").strip()
@@ -92,7 +93,16 @@ def _build_mcp() -> FastMCP:
     ) -> dict:
         """Start a background revenue-leak audit and return an audit_id immediately."""
         try:
-            return start_audit_job(site_name, base_url, max_pages=max_pages)
+            args = validate_tool_args("start_audit", {
+                "site_name": site_name,
+                "base_url": base_url,
+                "max_pages": max_pages,
+            })
+            return start_audit_job(
+                args["site_name"],
+                args["base_url"],
+                max_pages=args["max_pages"],
+            )
         except Exception as exc:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
@@ -138,11 +148,17 @@ def _build_mcp() -> FastMCP:
         findings, resolved findings, and structured offer changes.
         """
         try:
+            args = validate_tool_args("monitor_site", {
+                "site_name": site_name,
+                "base_url": base_url,
+                "max_pages": max_pages,
+                "cadence_hours": cadence_hours,
+            })
             return create_monitor(
-                site_name,
-                base_url,
-                max_pages=max_pages,
-                cadence_hours=cadence_hours,
+                args["site_name"],
+                args["base_url"],
+                max_pages=args["max_pages"],
+                cadence_hours=args["cadence_hours"],
             )
         except Exception as exc:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
@@ -240,71 +256,161 @@ def _auth_error() -> JSONResponse:
 
 
 def openapi_spec(server_url: str) -> dict:
-    desc = ADAPTER.describe()
-    audit_schema = desc["tools"][0]["input_schema"]
     security = [{"bearerAuth": []}] if API_TOKEN else []
+
+    def obj(properties=None, required=None):
+        schema = {
+            "type": "object",
+            "properties": properties or {},
+            "additionalProperties": False,
+        }
+        if required:
+            schema["required"] = required
+        return schema
+
     spec = {
         "openapi": "3.0.3",
         "info": {
             "title": "Revenue Rescue",
-            "version": "0.2.0",
+            "version": "0.3.0",
             "description": (
-                "Agent-native website revenue-leak auditing. Returns confirmed "
-                "evidence for broken affiliate destinations, tracking loss, "
-                "soft-404 product redirects, and unhealthy redirect chains."
+                "Agent-native commerce observability: audits, evidence-backed "
+                "findings, explanations, persistent monitors, and change detection."
             ),
         },
         "servers": [{"url": server_url.rstrip("/")}],
         "paths": {
-            "/api/v1/audits": {
+            "/api/v1/jobs": {
                 "post": {
-                    "operationId": "auditSite",
-                    "summary": "Run a revenue-leak audit",
+                    "operationId": "startAudit",
+                    "summary": "Start a background revenue audit",
                     "security": security,
                     "requestBody": {
                         "required": True,
-                        "content": {"application/json": {"schema": audit_schema}},
-                    },
-                    "responses": {
-                        "200": {
-                            "description": "Completed audit",
-                            "content": {
-                                "application/json": {"schema": {"type": "object"}}
-                            },
+                        "content": {
+                            "application/json": {
+                                "schema": next(
+                                    t["input_schema"]
+                                    for t in ADAPTER.describe()["tools"]
+                                    if t["name"] == "start_audit"
+                                )
+                            }
                         },
-                        "400": {"description": "Bad request"},
-                        "401": {"description": "Unauthorized"},
                     },
-                },
-                "get": {
-                    "operationId": "listAudits",
-                    "summary": "List recent audit reports",
-                    "security": security,
-                    "responses": {
-                        "200": {"description": "Recent audit report filenames"},
-                        "401": {"description": "Unauthorized"},
-                    },
-                },
+                    "responses": {"200": {"description": "Audit queued"}},
+                }
             },
-            "/api/v1/audits/{report_name}": {
+            "/api/v1/jobs/{audit_id}": {
                 "get": {
-                    "operationId": "getAudit",
-                    "summary": "Fetch a completed audit report",
+                    "operationId": "getAuditStatus",
+                    "summary": "Get audit job status",
+                    "security": security,
+                    "parameters": [{
+                        "name": "audit_id", "in": "path", "required": True,
+                        "schema": {"type": "string"}
+                    }],
+                    "responses": {"200": {"description": "Audit status"}},
+                }
+            },
+            "/api/v1/jobs/{audit_id}/findings": {
+                "get": {
+                    "operationId": "getFindings",
+                    "summary": "Get audit findings",
                     "security": security,
                     "parameters": [
-                        {
-                            "name": "report_name",
-                            "in": "path",
-                            "required": True,
-                            "schema": {"type": "string"},
-                        }
+                        {"name": "audit_id", "in": "path", "required": True, "schema": {"type": "string"}},
+                        {"name": "severity", "in": "query", "required": False, "schema": {"type": "string"}},
+                        {"name": "issue_type", "in": "query", "required": False, "schema": {"type": "string"}},
                     ],
-                    "responses": {
-                        "200": {"description": "Audit report"},
-                        "400": {"description": "Invalid report name"},
-                        "401": {"description": "Unauthorized"},
-                        "404": {"description": "Audit not found"},
+                    "responses": {"200": {"description": "Findings"}},
+                }
+            },
+            "/api/v1/jobs/{audit_id}/findings/{finding_id}": {
+                "get": {
+                    "operationId": "explainFinding",
+                    "summary": "Explain one finding",
+                    "security": security,
+                    "parameters": [
+                        {"name": "audit_id", "in": "path", "required": True, "schema": {"type": "string"}},
+                        {"name": "finding_id", "in": "path", "required": True, "schema": {"type": "string"}},
+                    ],
+                    "responses": {"200": {"description": "Finding explanation"}},
+                }
+            },
+            "/api/v1/monitors": {
+                "post": {
+                    "operationId": "createMonitor",
+                    "summary": "Create a persistent revenue monitor",
+                    "security": security,
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": next(
+                                    t["input_schema"]
+                                    for t in ADAPTER.describe()["tools"]
+                                    if t["name"] == "monitor_site"
+                                )
+                            }
+                        },
                     },
+                    "responses": {"200": {"description": "Monitor created"}},
+                }
+            },
+            "/api/v1/monitors/{monitor_id}": {
+                "get": {
+                    "operationId": "getMonitorStatus",
+                    "summary": "Get monitor status",
+                    "security": security,
+                    "parameters": [{
+                        "name": "monitor_id", "in": "path", "required": True,
+                        "schema": {"type": "string"}
+                    }],
+                    "responses": {"200": {"description": "Monitor status"}},
+                }
+            },
+            "/api/v1/monitors/{monitor_id}/run": {
+                "post": {
+                    "operationId": "runMonitorNow",
+                    "summary": "Run a monitor immediately",
+                    "security": security,
+                    "parameters": [{
+                        "name": "monitor_id", "in": "path", "required": True,
+                        "schema": {"type": "string"}
+                    }],
+                    "responses": {"200": {"description": "Monitor result"}},
+                }
+            },
+            "/api/v1/monitors/{monitor_id}/changes": {
+                "get": {
+                    "operationId": "getMonitorChanges",
+                    "summary": "Get latest monitor changes",
+                    "security": security,
+                    "parameters": [{
+                        "name": "monitor_id", "in": "path", "required": True,
+                        "schema": {"type": "string"}
+                    }],
+                    "responses": {"200": {"description": "Detected changes"}},
+                }
+            },
+            "/api/v1/audits": {
+                "post": {
+                    "operationId": "auditSite",
+                    "summary": "Run a small synchronous audit",
+                    "security": security,
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": next(
+                                    t["input_schema"]
+                                    for t in ADAPTER.describe()["tools"]
+                                    if t["name"] == "audit_site"
+                                )
+                            }
+                        },
+                    },
+                    "responses": {"200": {"description": "Completed audit"}},
                 }
             },
         },
@@ -399,6 +505,132 @@ async def audit_report(request: Request) -> JSONResponse:
         )
 
 
+async def _authorized_json(request: Request) -> tuple[str, str] | JSONResponse:
+    rid = request.headers.get("x-request-id") or request_id()
+    client = request.client.host if request.client else "unknown"
+    if not allow_request(f"rest:{client}", limit=60, window_seconds=60):
+        return JSONResponse(
+            {"ok": False, "error": "rate limit exceeded", "request_id": rid},
+            status_code=429,
+            headers={"X-Request-ID": rid, "Retry-After": "60"},
+        )
+    if not _bearer_authorized(request):
+        response = _auth_error()
+        response.headers["X-Request-ID"] = rid
+        return response
+    return rid, client
+
+
+async def jobs_collection(request: Request) -> JSONResponse:
+    auth = await _authorized_json(request)
+    if isinstance(auth, JSONResponse):
+        return auth
+    rid, _client = auth
+    try:
+        body = await request.json()
+        body = validate_tool_args("start_audit", body)
+        out = start_audit_job(
+            body["site_name"],
+            body["base_url"],
+            max_pages=body["max_pages"],
+        )
+    except Exception as exc:
+        out = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    return JSONResponse({**out, "request_id": rid}, status_code=200 if out.get("ok") else 400)
+
+
+async def job_detail(request: Request) -> JSONResponse:
+    auth = await _authorized_json(request)
+    if isinstance(auth, JSONResponse):
+        return auth
+    rid, _client = auth
+    out = get_job(request.path_params["audit_id"])
+    return JSONResponse({**out, "request_id": rid}, status_code=200 if out.get("ok") else 404)
+
+
+async def job_findings(request: Request) -> JSONResponse:
+    auth = await _authorized_json(request)
+    if isinstance(auth, JSONResponse):
+        return auth
+    rid, _client = auth
+    out = get_job_findings(
+        request.path_params["audit_id"],
+        severity=request.query_params.get("severity"),
+        issue_type=request.query_params.get("issue_type"),
+    )
+    return JSONResponse({**out, "request_id": rid}, status_code=200 if out.get("ok") else 404)
+
+
+async def finding_detail(request: Request) -> JSONResponse:
+    auth = await _authorized_json(request)
+    if isinstance(auth, JSONResponse):
+        return auth
+    rid, _client = auth
+    out = get_finding(
+        request.path_params["audit_id"],
+        request.path_params["finding_id"],
+    )
+    return JSONResponse({**out, "request_id": rid}, status_code=200 if out.get("ok") else 404)
+
+
+async def monitors_collection(request: Request) -> JSONResponse:
+    auth = await _authorized_json(request)
+    if isinstance(auth, JSONResponse):
+        return auth
+    rid, _client = auth
+    try:
+        body = await request.json()
+        body = validate_tool_args("monitor_site", body)
+        out = create_monitor(
+            body["site_name"],
+            body["base_url"],
+            max_pages=body["max_pages"],
+            cadence_hours=body["cadence_hours"],
+        )
+    except Exception as exc:
+        out = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    return JSONResponse({**out, "request_id": rid}, status_code=200 if out.get("ok") else 400)
+
+
+async def monitor_detail(request: Request) -> JSONResponse:
+    auth = await _authorized_json(request)
+    if isinstance(auth, JSONResponse):
+        return auth
+    rid, _client = auth
+    monitor = get_monitor(request.path_params["monitor_id"])
+    if not monitor.get("ok"):
+        return JSONResponse({**monitor, "request_id": rid}, status_code=404)
+    out = {
+        "ok": True,
+        "monitor_id": monitor.get("monitor_id"),
+        "site_name": monitor.get("site_name"),
+        "base_url": monitor.get("base_url"),
+        "cadence_hours": monitor.get("cadence_hours"),
+        "last_run_at": monitor.get("last_run_at"),
+        "has_baseline": monitor.get("baseline") is not None,
+        "last_change_count": len(monitor.get("last_changes", [])),
+    }
+    return JSONResponse({**out, "request_id": rid})
+
+
+async def monitor_run(request: Request) -> JSONResponse:
+    auth = await _authorized_json(request)
+    if isinstance(auth, JSONResponse):
+        return auth
+    rid, _client = auth
+    out = await asyncio.to_thread(run_monitor, request.path_params["monitor_id"])
+    return JSONResponse({**out, "request_id": rid}, status_code=200 if out.get("ok") else 404)
+
+
+async def monitor_changes(request: Request) -> JSONResponse:
+    auth = await _authorized_json(request)
+    if isinstance(auth, JSONResponse):
+        return auth
+    rid, _client = auth
+    out = get_changes(request.path_params["monitor_id"])
+    return JSONResponse({**out, "request_id": rid}, status_code=200 if out.get("ok") else 404)
+
+
 async def cron_due_monitors(request: Request) -> JSONResponse:
     rid = request.headers.get("x-request-id") or request_id()
     if not CRON_SECRET:
@@ -453,6 +685,14 @@ app = Starlette(
         Route("/api/v1/openapi.json", openapi, methods=["GET"]),
         Route("/api/v1/audits", audits, methods=["GET", "POST"]),
         Route("/api/v1/audits/{report_name}", audit_report, methods=["GET"]),
+        Route("/api/v1/jobs", jobs_collection, methods=["POST"]),
+        Route("/api/v1/jobs/{audit_id}", job_detail, methods=["GET"]),
+        Route("/api/v1/jobs/{audit_id}/findings", job_findings, methods=["GET"]),
+        Route("/api/v1/jobs/{audit_id}/findings/{finding_id}", finding_detail, methods=["GET"]),
+        Route("/api/v1/monitors", monitors_collection, methods=["POST"]),
+        Route("/api/v1/monitors/{monitor_id}", monitor_detail, methods=["GET"]),
+        Route("/api/v1/monitors/{monitor_id}/run", monitor_run, methods=["POST"]),
+        Route("/api/v1/monitors/{monitor_id}/changes", monitor_changes, methods=["GET"]),
         Route("/internal/cron/due-monitors", cron_due_monitors, methods=["POST"]),
         Mount("/", app=MCP_APP),
     ],

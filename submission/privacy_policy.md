@@ -1,44 +1,96 @@
-REVENUE RESCUE - PRIVACY POLICY
-Last updated: October 1, 2026
-Contact: hello@freedomengineers.tech
+# Revenue Rescue — Privacy Policy (Draft)
 
-1. WHAT THIS SERVICE DOES
-Revenue Rescue audits public publisher websites for revenue leaks: dead
-affiliate links, missing tracking parameters, and soft-404 product redirects.
-You give it a public website URL; it returns a report of confirmed findings.
+**Status:** pre-launch draft. Final public retention periods, hosting providers,
+and business contact details must be confirmed before publication.
 
-2. DATA WE COLLECT
-- The website URL and site name you submit for audit.
-- Audit reports we generate (pages scanned, links checked, findings).
-- Basic technical logs (request time, HTTP status) used for reliability.
+## 1. What Revenue Rescue does
 
-3. DATA WE DO NOT COLLECT
-- No accounts, passwords, or credentials.
-- No payment information. If you purchase a related service separately, that
-  transaction is handled by the payment provider under their own policy.
-- No browsing history, cookies, or tracking of your activity outside the
-  audits you explicitly request.
+Revenue Rescue audits public websites for evidence-backed commerce and
+monetization risks and can monitor those sites over time for meaningful
+changes.
 
-4. HOW DATA IS USED
-Audit data is used solely to produce the report you requested and to improve
-scan reliability. We do not sell data, share it with advertisers, or use
-audit content for ad targeting.
+Examples include broken merchant destinations, affiliate attribution loss,
+soft-404 product redirects, explicitly discontinued offers, and destination
+changes.
 
-5. DATA RETENTION
-Audit reports are kept for 90 days, then deleted. Technical logs are kept for
-30 days. You can request deletion of your reports at any time by emailing
-hello@freedomengineers.tech.
+## 2. Data Revenue Rescue processes
 
-6. THIRD PARTIES
-The scanner makes ordinary HTTP requests to the public websites you ask it to
-audit (the same requests a browser would make). No analytics SDKs, ad
-networks, or data brokers are embedded in the service.
+Depending on the feature used, the service may process and store:
 
-7. SECURITY
-Audit traffic runs over HTTPS. Reports are stored on access-controlled
-infrastructure. If a security issue is found, contact
-hello@freedomengineers.tech and it will be addressed promptly.
+- the public website URL and site name submitted by the user;
+- public pages and outbound URLs needed to perform an audit;
+- HTTP status and redirect evidence;
+- link/CTA context such as anchor text and nearby headings;
+- public Product/Offer structured data;
+- generated findings, risk scores, and recommended actions;
+- monitor configuration and prior evidence snapshots used for comparison;
+- technical service logs such as request IDs, timestamps, status, and errors.
 
-8. CHANGES
-If this policy changes materially, the "Last updated" date above will change
-and the current version will remain published at the product website.
+## 3. Data Revenue Rescue does not need for public-site audits
+
+Revenue Rescue does not require the scanned website's:
+
+- administrator password;
+- CMS credentials;
+- private customer database;
+- payment card data;
+- private pages or intranet URLs.
+
+Production access to Revenue Rescue itself may use an API or connector
+credential. That credential authenticates access to Revenue Rescue; it is not a
+credential for the website being scanned.
+
+## 4. How data is used
+
+Processed data is used to:
+
+- perform requested audits;
+- create and operate requested monitors;
+- compare current evidence with prior baselines;
+- return findings and explanations to the requesting client/agent;
+- secure, debug, and improve service reliability.
+
+Revenue Rescue does not sell audit or monitor data to advertisers.
+
+## 5. Public website requests
+
+Revenue Rescue makes automated requests to public HTTP(S) pages needed to
+perform the requested audit or monitor run. Rate limits and crawl bounds are
+used to limit load.
+
+Private/local network targets are blocked by application-level SSRF controls.
+
+## 6. Storage and retention
+
+Audit jobs and monitor state may be stored on access-controlled server
+infrastructure so background work and recurring monitoring can function across
+deployments.
+
+**Before public launch, the final production retention schedule and deletion
+process must be finalized and published here.** The deployed service should not
+claim a retention period that is not technically enforced.
+
+## 7. Service providers
+
+Production infrastructure providers may process data on Revenue Rescue's behalf
+for hosting, database, logging, or delivery. The final published policy should
+name or categorize the providers actually used in production.
+
+## 8. Security
+
+Current technical safeguards include HTTPS at the deployment edge, authenticated
+API access when configured, request rate limits, SSRF protections, bounded
+monitor execution, structured request IDs, and access-controlled database
+storage.
+
+No internet service can guarantee absolute security.
+
+## 9. User requests
+
+Before public launch, Revenue Rescue will publish a stable support contact for
+privacy, access, correction, and deletion requests.
+
+## 10. Changes
+
+The public policy should display its effective date and be updated when material
+data practices change.

@@ -8,6 +8,8 @@ os.environ["REVENUE_RESCUE_SCRAPLING"] = "0"
 
 from revenuerescue import audit
 from revenuerescue.adapters.muse import MuseAdapter
+from revenuerescue.adapters.openai import OpenAIAdapter
+from revenuerescue.contracts import TOOLS
 from revenuerescue.commerce import extract_commerce_context
 from revenuerescue.crawler import crawl_pages
 from revenuerescue.evidence import build_finding, tracking_evidence
@@ -17,6 +19,7 @@ from revenuerescue.jobs import get_finding, get_findings as get_job_findings
 from revenuerescue.monitoring import diff_snapshots, due_monitors, snapshot_from_report
 from revenuerescue.server import _valid_report_name, openapi_spec
 from revenuerescue import storage
+from revenuerescue.validation import ValidationError, validate_tool_args
 
 
 class VerdictTests(unittest.TestCase):
@@ -412,7 +415,66 @@ class JobContractTests(unittest.TestCase):
         self.assertEqual(result["recommended_action"], "Replace the link.")
 
 
+class ValidationTests(unittest.TestCase):
+    def test_defaults_and_normalizes_audit_args(self):
+        args = validate_tool_args("start_audit", {
+            "site_name": "Example",
+            "base_url": "https://example.com",
+        })
+        self.assertEqual(args["max_pages"], 8)
+
+    def test_rejects_non_http_url(self):
+        with self.assertRaises(ValidationError):
+            validate_tool_args("start_audit", {
+                "site_name": "Example",
+                "base_url": "file:///etc/passwd",
+            })
+
+    def test_rejects_out_of_range_page_count(self):
+        with self.assertRaises(ValidationError):
+            validate_tool_args("start_audit", {
+                "site_name": "Example",
+                "base_url": "https://example.com",
+                "max_pages": 5000,
+            })
+
+    def test_rejects_unexpected_fields(self):
+        with self.assertRaises(ValidationError):
+            validate_tool_args("monitor_site", {
+                "site_name": "Example",
+                "base_url": "https://example.com",
+                "admin_token": "secret",
+            })
+
+
 class ContractTests(unittest.TestCase):
+    def test_platform_adapters_share_same_tool_names(self):
+        canonical = [tool["name"] for tool in TOOLS]
+        muse = [tool["name"] for tool in MuseAdapter().describe()["tools"]]
+        openai = [fn["name"] for fn in OpenAIAdapter().describe()["functions"]]
+        self.assertEqual(muse, canonical)
+        self.assertEqual(openai, canonical)
+
+    def test_openapi_exposes_modern_operations(self):
+        spec = openapi_spec("https://revenue-rescue.example/")
+        operation_ids = {
+            operation["operationId"]
+            for path in spec["paths"].values()
+            for operation in path.values()
+            if isinstance(operation, dict) and "operationId" in operation
+        }
+        self.assertTrue({
+            "startAudit",
+            "getAuditStatus",
+            "getFindings",
+            "explainFinding",
+            "createMonitor",
+            "getMonitorStatus",
+            "runMonitorNow",
+            "getMonitorChanges",
+        }.issubset(operation_ids))
+
+
     def test_muse_contract_has_required_fields(self):
         desc = MuseAdapter().describe()
         audit_tool = next(t for t in desc["tools"] if t["name"] == "audit_site")
