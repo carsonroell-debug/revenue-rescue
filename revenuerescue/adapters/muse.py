@@ -9,6 +9,7 @@ from ..audit import run_audit
 from ..contracts import TOOLS
 from ..jobs import get_finding, get_findings, get_job, start_audit_job
 from ..monitoring import create_monitor, get_changes, get_monitor, run_monitor
+from ..validation import ValidationError, validate_tool_args
 
 
 class MuseAdapter(AgentAdapter):
@@ -31,6 +32,13 @@ class MuseAdapter(AgentAdapter):
         }
 
     def invoke(self, tool, args):
+        try:
+            args = validate_tool_args(tool, args)
+        except KeyError:
+            return {"ok": False, "error": f"unknown tool: {tool}"}
+        except ValidationError as exc:
+            return {"ok": False, "error": str(exc)}
+
         if tool == "audit_site":
             site_name = args.get("site_name")
             base_url = args.get("base_url")
