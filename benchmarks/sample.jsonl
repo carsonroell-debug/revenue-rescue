@@ -1,0 +1,3 @@
+{"case_id":"confirmed-404","expected":["BROKEN_DESTINATION"],"predicted":["BROKEN_DESTINATION"]}
+{"case_id":"healthy-link","expected":[],"predicted":[]}
+{"case_id":"false-positive-example","expected":[],"predicted":["REDIRECT_CHAIN"]}
