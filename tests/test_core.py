@@ -21,6 +21,8 @@ from revenuerescue.server import openapi_spec
 from revenuerescue.config import RuntimeConfig
 from revenuerescue import storage
 from revenuerescue.validation import ValidationError, validate_tool_args
+from revenuerescue.errors import invalid_input, not_found, rate_limited
+from revenuerescue.version import __version__
 
 
 class VerdictTests(unittest.TestCase):
@@ -456,6 +458,35 @@ class ValidationTests(unittest.TestCase):
                 "base_url": "https://example.com",
                 "admin_token": "secret",
             })
+
+
+class ReleaseEngineeringTests(unittest.TestCase):
+    def test_version_is_semver_like(self):
+        parts = __version__.split(".")
+        self.assertEqual(len(parts), 3)
+        self.assertTrue(all(part.isdigit() for part in parts))
+
+    def test_error_envelopes_are_machine_readable(self):
+        bad = invalid_input("bad input", field="base_url")
+        self.assertFalse(bad["ok"])
+        self.assertEqual(bad["error"]["code"], "INVALID_INPUT")
+        self.assertFalse(bad["error"]["retryable"])
+        self.assertEqual(bad["error"]["details"]["field"], "base_url")
+
+        missing = not_found("monitor", "abc")
+        self.assertEqual(missing["error"]["code"], "NOT_FOUND")
+        self.assertEqual(missing["error"]["details"]["id"], "abc")
+
+        limited = rate_limited(30)
+        self.assertTrue(limited["error"]["retryable"])
+        self.assertEqual(limited["error"]["details"]["retry_after_seconds"], 30)
+
+    def test_storage_health_local_backend(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(storage, "DATABASE_URL", ""), patch.object(storage, "STATE_DIR", Path(tmp)):
+                result = storage.storage_health()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["backend"], "local-json")
 
 
 class ContractTests(unittest.TestCase):
