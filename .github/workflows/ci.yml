@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "chatgpt/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install runtime dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Compile
+        run: python -m compileall -q revenuerescue tests
+      - name: Unit tests
+        env:
+          REVENUE_RESCUE_SCRAPLING: "0"
+        run: python -m unittest discover -s tests -v
+      - name: Import production ASGI app
+        run: python -c "from revenuerescue.server import app, MCP; print(type(app).__name__, MCP.name)"
