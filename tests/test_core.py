@@ -13,6 +13,7 @@ from revenuerescue.crawler import crawl_pages
 from revenuerescue.evidence import build_finding, tracking_evidence
 from revenuerescue.security import UnsafeTarget, validate_public_http_url
 from revenuerescue.jobs import get_findings as get_job_findings
+from revenuerescue.monitoring import diff_snapshots, snapshot_from_report
 from revenuerescue.server import _valid_report_name, openapi_spec
 
 
@@ -164,6 +165,89 @@ class CrawleeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rows), 2)
         self.assertTrue(all(row["status"] == 200 for row in rows))
         self.assertTrue(all(row["error"] is None for row in rows))
+
+
+class MonitoringTests(unittest.TestCase):
+    def test_detects_tracking_drop_and_destination_change(self):
+        previous = {
+            "links": {
+                "page|url": {
+                    "page": "https://publisher.test/post",
+                    "url": "https://merchant.test/item?tag=cars-20",
+                    "final_url": "https://merchant.test/item?tag=cars-20",
+                    "final_status": 200,
+                    "is_affiliate": True,
+                    "is_cta": True,
+                    "tracking_final": {"tag": ["cars-20"]},
+                }
+            },
+            "findings": {},
+            "pages": {},
+        }
+        current = {
+            "links": {
+                "page|url": {
+                    "page": "https://publisher.test/post",
+                    "url": "https://merchant.test/item?tag=cars-20",
+                    "final_url": "https://merchant.test/new-item",
+                    "final_status": 200,
+                    "is_affiliate": True,
+                    "is_cta": True,
+                    "tracking_final": {},
+                }
+            },
+            "findings": {},
+            "pages": {},
+        }
+        events = diff_snapshots(previous, current)
+        event_types = {event["event_type"] for event in events}
+        self.assertIn("DESTINATION_CHANGED", event_types)
+        self.assertIn("TRACKING_DROPPED", event_types)
+        tracking = next(e for e in events if e["event_type"] == "TRACKING_DROPPED")
+        self.assertEqual(tracking["severity"], "critical")
+
+    def test_detects_new_and_resolved_findings(self):
+        old_finding = {
+            "issue_type": "BROKEN_DESTINATION",
+            "severity": "high",
+            "page": "p",
+            "url": "u",
+            "finding": "404",
+        }
+        new_finding = {
+            "issue_type": "AFFILIATE_TRACKING_MISSING",
+            "severity": "critical",
+            "page": "p2",
+            "url": "u2",
+            "finding": "tracking",
+        }
+        previous = {"links": {}, "pages": {}, "findings": {"old": old_finding}}
+        current = {"links": {}, "pages": {}, "findings": {"new": new_finding}}
+        events = diff_snapshots(previous, current)
+        types = {e["event_type"] for e in events}
+        self.assertEqual(types, {"NEW_REVENUE_RISK", "REVENUE_RISK_RESOLVED"})
+
+    def test_detects_structured_offer_change(self):
+        previous = {
+            "links": {},
+            "findings": {},
+            "pages": {
+                "https://publisher.test/deal": {
+                    "commerce_offers": [{"price": "499", "currency": "CAD", "availability": "InStock"}]
+                }
+            },
+        }
+        current = {
+            "links": {},
+            "findings": {},
+            "pages": {
+                "https://publisher.test/deal": {
+                    "commerce_offers": [{"price": "549", "currency": "CAD", "availability": "InStock"}]
+                }
+            },
+        }
+        events = diff_snapshots(previous, current)
+        self.assertEqual(events[0]["event_type"], "OFFER_DATA_CHANGED")
 
 
 class JobContractTests(unittest.TestCase):

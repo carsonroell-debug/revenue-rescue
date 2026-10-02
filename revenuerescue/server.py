@@ -33,6 +33,7 @@ from .adapters.muse import MuseAdapter
 from .audit import WORK_DIR
 from .jobs import get_findings as get_job_findings
 from .jobs import get_job, start_audit_job
+from .monitoring import create_monitor, get_changes, get_monitor, run_monitor
 
 ADAPTER = MuseAdapter()
 API_TOKEN = os.environ.get("REVENUE_RESCUE_API_TOKEN", "").strip()
@@ -110,6 +111,62 @@ def _build_mcp() -> FastMCP:
         """Return completed findings, optionally filtered by severity or issue type."""
         try:
             return get_job_findings(audit_id, severity=severity, issue_type=issue_type)
+        except Exception as exc:
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    @server.tool
+    async def monitor_site(
+        site_name: str,
+        base_url: str,
+        max_pages: int = 8,
+        cadence_hours: int = 24,
+    ) -> dict:
+        """Create a persistent website revenue monitor.
+
+        The first run establishes a baseline. Later runs emit only meaningful
+        evidence changes such as tracking loss, destination changes, new
+        findings, resolved findings, and structured offer changes.
+        """
+        try:
+            return create_monitor(
+                site_name,
+                base_url,
+                max_pages=max_pages,
+                cadence_hours=cadence_hours,
+            )
+        except Exception as exc:
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    @server.tool
+    async def run_monitor_now(monitor_id: str) -> dict:
+        """Run a monitor immediately and compare its evidence to the prior baseline."""
+        return await asyncio.to_thread(run_monitor, monitor_id)
+
+    @server.tool
+    async def get_monitor_status(monitor_id: str) -> dict:
+        """Return one monitor's configuration, latest run, and baseline metadata."""
+        try:
+            monitor = get_monitor(monitor_id)
+            if not monitor.get("ok"):
+                return monitor
+            return {
+                "ok": True,
+                "monitor_id": monitor_id,
+                "site_name": monitor.get("site_name"),
+                "base_url": monitor.get("base_url"),
+                "cadence_hours": monitor.get("cadence_hours"),
+                "last_run_at": monitor.get("last_run_at"),
+                "has_baseline": monitor.get("baseline") is not None,
+                "last_change_count": len(monitor.get("last_changes", [])),
+            }
+        except Exception as exc:
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    @server.tool
+    async def get_monitor_changes(monitor_id: str) -> dict:
+        """Return the latest evidence changes detected by a Revenue Rescue monitor."""
+        try:
+            return get_changes(monitor_id)
         except Exception as exc:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
