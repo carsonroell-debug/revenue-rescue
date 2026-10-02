@@ -15,6 +15,7 @@ from revenuerescue.security import UnsafeTarget, validate_public_http_url
 from revenuerescue.jobs import get_findings as get_job_findings
 from revenuerescue.monitoring import diff_snapshots, snapshot_from_report
 from revenuerescue.server import _valid_report_name, openapi_spec
+from revenuerescue import storage
 
 
 class VerdictTests(unittest.TestCase):
@@ -248,6 +249,22 @@ class MonitoringTests(unittest.TestCase):
         }
         events = diff_snapshots(previous, current)
         self.assertEqual(events[0]["event_type"], "OFFER_DATA_CHANGED")
+
+
+class StorageTests(unittest.TestCase):
+    def test_local_state_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(storage, "DATABASE_URL", ""), patch.object(storage, "STATE_DIR", Path(tmp)):
+                storage.put_state("audit_jobs", "00000000-0000-0000-0000-000000000001", {"ok": True, "x": 1})
+                loaded = storage.get_state("audit_jobs", "00000000-0000-0000-0000-000000000001")
+                self.assertEqual(loaded["x"], 1)
+                self.assertTrue(storage.delete_state("audit_jobs", "00000000-0000-0000-0000-000000000001"))
+                self.assertIsNone(storage.get_state("audit_jobs", "00000000-0000-0000-0000-000000000001"))
+
+    def test_unsupported_state_kind_is_rejected_for_postgres(self):
+        with patch.object(storage, "DATABASE_URL", "postgresql://configured"):
+            with self.assertRaises(ValueError):
+                storage._table("unknown")
 
 
 class JobContractTests(unittest.TestCase):
