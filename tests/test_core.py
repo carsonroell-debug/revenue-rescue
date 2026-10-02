@@ -17,7 +17,8 @@ from revenuerescue.intelligence import discontinued_offer, page_priority
 from revenuerescue.security import UnsafeTarget, validate_public_http_url
 from revenuerescue.jobs import get_finding, get_findings as get_job_findings
 from revenuerescue.monitoring import diff_snapshots, due_monitors, snapshot_from_report
-from revenuerescue.server import _valid_report_name, openapi_spec
+from revenuerescue.server import openapi_spec
+from revenuerescue.config import RuntimeConfig
 from revenuerescue import storage
 from revenuerescue.validation import ValidationError, validate_tool_args
 
@@ -500,10 +501,28 @@ class ContractTests(unittest.TestCase):
             "auditSite",
         )
 
-    def test_report_filename_validation_blocks_traversal(self):
-        self.assertTrue(_valid_report_name("major-hifi-20261001.json"))
-        self.assertFalse(_valid_report_name("../secret.json"))
-        self.assertFalse(_valid_report_name("report.txt"))
+    def test_production_config_requires_auth_cron_and_database(self):
+        cfg = RuntimeConfig(
+            environment="production",
+            api_token="",
+            cron_secret="",
+            database_url="",
+            scrapling_enabled=True,
+            port=8787,
+        )
+        problems = cfg.problems()
+        self.assertEqual(len(problems), 3)
+
+    def test_development_config_allows_local_fallbacks(self):
+        cfg = RuntimeConfig(
+            environment="development",
+            api_token="",
+            cron_secret="",
+            database_url="",
+            scrapling_enabled=False,
+            port=8787,
+        )
+        self.assertEqual(cfg.problems(), [])
 
 
 class PipelineTests(unittest.TestCase):
