@@ -30,6 +30,8 @@ from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Mount, Route
 
 from .adapters.muse import MuseAdapter
+from .config import assert_startup_ready, load_config
+from .version import __version__
 from .audit import WORK_DIR
 from .jobs import get_finding, get_findings as get_job_findings
 from .jobs import get_job, start_audit_job
@@ -38,8 +40,9 @@ from .ops import allow_request, log_event, request_id
 from .validation import ValidationError, validate_tool_args
 
 ADAPTER = MuseAdapter()
-API_TOKEN = os.environ.get("REVENUE_RESCUE_API_TOKEN", "").strip()
-CRON_SECRET = os.environ.get("REVENUE_RESCUE_CRON_SECRET", "").strip()
+CONFIG = assert_startup_ready(load_config())
+API_TOKEN = CONFIG.api_token
+CRON_SECRET = CONFIG.cron_secret
 
 
 def _build_mcp() -> FastMCP:
@@ -197,21 +200,6 @@ def _build_mcp() -> FastMCP:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     @server.tool
-    async def list_audits() -> dict:
-        """List recent Revenue Rescue audit reports available on this server."""
-        return ADAPTER.invoke("list_audits", {})
-
-    @server.tool
-    async def get_audit(report_name: str) -> dict:
-        """Load one previously completed audit report by its report filename."""
-        try:
-            return {"ok": True, "report": _load_report(report_name)}
-        except ValueError as exc:
-            return {"ok": False, "error": str(exc)}
-        except FileNotFoundError:
-            return {"ok": False, "error": "audit report not found"}
-
-    @server.tool
     async def health_check() -> dict:
         """Check whether Revenue Rescue is online and ready for tool calls."""
         return {
@@ -222,19 +210,6 @@ def _build_mcp() -> FastMCP:
         }
 
     return server
-
-
-def _valid_report_name(name: str) -> bool:
-    return bool(re.fullmatch(r"[a-z0-9][a-z0-9.\-_]*\.json", name, re.I))
-
-
-def _load_report(name: str) -> dict:
-    if not _valid_report_name(name):
-        raise ValueError("invalid report filename")
-    path = Path(WORK_DIR) / name
-    if not path.exists():
-        raise FileNotFoundError(name)
-    return json.loads(path.read_text())
 
 
 def _bearer_authorized(request: Request) -> bool:
@@ -272,7 +247,7 @@ def openapi_spec(server_url: str) -> dict:
         "openapi": "3.0.3",
         "info": {
             "title": "Revenue Rescue",
-            "version": "0.3.0",
+            "version": __version__,
             "description": (
                 "Agent-native commerce observability: audits, evidence-backed "
                 "findings, explanations, persistent monitors, and change detection."
@@ -433,12 +408,24 @@ async def health(_: Request) -> JSONResponse:
         {
             "ok": True,
             "service": "revenue-rescue",
-            "version": "0.2.0",
+            "version": __version__,
             "mcp": "/mcp",
-            "rest": "/api/v1/audits",
+            "rest": "/api/v1",
             "auth_enabled": bool(API_TOKEN),
         }
     )
+
+
+async def ready(_: Request) -> JSONResponse:
+    problems = CONFIG.problems()
+    payload = {
+        "ok": not problems,
+        "service": "revenue-rescue",
+        "version": __version__,
+        "config": CONFIG.public_status(),
+        "problems": problems,
+    }
+    return JSONResponse(payload, status_code=200 if not problems else 503)
 
 
 async def openapi(request: Request) -> JSONResponse:
@@ -487,22 +474,6 @@ async def audits(request: Request) -> JSONResponse:
         status_code=200 if out.get("ok") else 400,
         headers={"X-Request-ID": rid},
     )
-
-
-async def audit_report(request: Request) -> JSONResponse:
-    if not _bearer_authorized(request):
-        return _auth_error()
-
-    name = request.path_params["report_name"]
-    try:
-        return JSONResponse({"ok": True, "report": _load_report(name)})
-    except ValueError as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-    except FileNotFoundError:
-        return JSONResponse(
-            {"ok": False, "error": "audit report not found"},
-            status_code=404,
-        )
 
 
 async def _authorized_json(request: Request) -> tuple[str, str] | JSONResponse:
@@ -682,9 +653,9 @@ app = Starlette(
     routes=[
         Route("/", homepage, methods=["GET"]),
         Route("/health", health, methods=["GET"]),
+        Route("/ready", ready, methods=["GET"]),
         Route("/api/v1/openapi.json", openapi, methods=["GET"]),
-        Route("/api/v1/audits", audits, methods=["GET", "POST"]),
-        Route("/api/v1/audits/{report_name}", audit_report, methods=["GET"]),
+        Route("/api/v1/audits", audits, methods=["POST"]),
         Route("/api/v1/jobs", jobs_collection, methods=["POST"]),
         Route("/api/v1/jobs/{audit_id}", job_detail, methods=["GET"]),
         Route("/api/v1/jobs/{audit_id}/findings", job_findings, methods=["GET"]),
@@ -703,8 +674,7 @@ app = Starlette(
 def main() -> None:
     import uvicorn
 
-    port = int(os.environ.get("PORT", "8787"))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=CONFIG.port)
 
 
 if __name__ == "__main__":
