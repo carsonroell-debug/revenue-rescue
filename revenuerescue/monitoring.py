@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .audit import WORK_DIR, run_audit
 from .security import validate_public_http_url
-from .storage import get_state, put_state
+from .storage import get_state, list_state, put_state
 
 def _validate_id(monitor_id: str) -> str:
     if not monitor_id or any(ch not in "0123456789abcdef-" for ch in monitor_id.lower()):
@@ -281,4 +281,51 @@ def get_changes(monitor_id: str) -> dict:
         "last_run_at": monitor.get("last_run_at"),
         "count": len(monitor.get("last_changes", [])),
         "changes": monitor.get("last_changes", []),
+    }
+
+
+def due_monitors(now: float | None = None, *, limit: int = 25) -> list[dict]:
+    """Return enabled monitors whose cadence has elapsed."""
+    now = time.time() if now is None else now
+    due = []
+    for monitor in list_state("monitors", limit=500):
+        if not monitor.get("ok", True) or monitor.get("enabled", True) is False:
+            continue
+        cadence = max(1, int(monitor.get("cadence_hours", 24))) * 3600
+        last_run = monitor.get("last_run_at")
+        if last_run is None or (now - float(last_run)) >= cadence:
+            due.append(monitor)
+        if len(due) >= max(1, min(100, int(limit))):
+            break
+    return due
+
+
+def run_due_monitors(*, limit: int = 5) -> dict:
+    """Run a bounded batch of due monitors for cron/worker execution."""
+    monitors = due_monitors(limit=limit)
+    results = []
+    for monitor in monitors:
+        monitor_id = monitor.get("monitor_id")
+        if not monitor_id:
+            continue
+        try:
+            result = run_monitor(monitor_id)
+            results.append({
+                "monitor_id": monitor_id,
+                "ok": bool(result.get("ok")),
+                "changes": len(result.get("changes", [])),
+                "error": result.get("error"),
+            })
+        except Exception as exc:
+            results.append({
+                "monitor_id": monitor_id,
+                "ok": False,
+                "changes": 0,
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+    return {
+        "ok": True,
+        "due_count": len(monitors),
+        "ran_count": len(results),
+        "results": results,
     }
