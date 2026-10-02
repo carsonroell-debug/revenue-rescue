@@ -35,6 +35,7 @@ from .jobs import get_finding, get_findings as get_job_findings
 from .jobs import get_job, start_audit_job
 from .monitoring import create_monitor, get_changes, get_monitor, run_due_monitors, run_monitor
 from .ops import allow_request, log_event, request_id
+from .validation import ValidationError, validate_tool_args
 
 ADAPTER = MuseAdapter()
 API_TOKEN = os.environ.get("REVENUE_RESCUE_API_TOKEN", "").strip()
@@ -92,7 +93,16 @@ def _build_mcp() -> FastMCP:
     ) -> dict:
         """Start a background revenue-leak audit and return an audit_id immediately."""
         try:
-            return start_audit_job(site_name, base_url, max_pages=max_pages)
+            args = validate_tool_args("start_audit", {
+                "site_name": site_name,
+                "base_url": base_url,
+                "max_pages": max_pages,
+            })
+            return start_audit_job(
+                args["site_name"],
+                args["base_url"],
+                max_pages=args["max_pages"],
+            )
         except Exception as exc:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
@@ -138,11 +148,17 @@ def _build_mcp() -> FastMCP:
         findings, resolved findings, and structured offer changes.
         """
         try:
+            args = validate_tool_args("monitor_site", {
+                "site_name": site_name,
+                "base_url": base_url,
+                "max_pages": max_pages,
+                "cadence_hours": cadence_hours,
+            })
             return create_monitor(
-                site_name,
-                base_url,
-                max_pages=max_pages,
-                cadence_hours=cadence_hours,
+                args["site_name"],
+                args["base_url"],
+                max_pages=args["max_pages"],
+                cadence_hours=args["cadence_hours"],
             )
         except Exception as exc:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
@@ -512,10 +528,11 @@ async def jobs_collection(request: Request) -> JSONResponse:
     rid, _client = auth
     try:
         body = await request.json()
+        body = validate_tool_args("start_audit", body)
         out = start_audit_job(
-            body.get("site_name"),
-            body.get("base_url"),
-            max_pages=body.get("max_pages", 8),
+            body["site_name"],
+            body["base_url"],
+            max_pages=body["max_pages"],
         )
     except Exception as exc:
         out = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
@@ -563,11 +580,12 @@ async def monitors_collection(request: Request) -> JSONResponse:
     rid, _client = auth
     try:
         body = await request.json()
+        body = validate_tool_args("monitor_site", body)
         out = create_monitor(
-            body.get("site_name"),
-            body.get("base_url"),
-            max_pages=body.get("max_pages", 8),
-            cadence_hours=body.get("cadence_hours", 24),
+            body["site_name"],
+            body["base_url"],
+            max_pages=body["max_pages"],
+            cadence_hours=body["cadence_hours"],
         )
     except Exception as exc:
         out = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
