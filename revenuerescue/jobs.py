@@ -18,32 +18,28 @@ from pathlib import Path
 
 from .audit import WORK_DIR, run_audit
 from .security import validate_public_http_url
-
-JOB_DIR = WORK_DIR / "jobs"
-JOB_DIR.mkdir(parents=True, exist_ok=True)
+from .storage import get_state, put_state
 
 _EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="revenue-audit")
 _LOCK = threading.Lock()
 
 
-def _job_path(audit_id: str) -> Path:
+def _validate_id(audit_id: str) -> str:
     if not audit_id or any(ch not in "0123456789abcdef-" for ch in audit_id.lower()):
         raise ValueError("invalid audit id")
-    return JOB_DIR / f"{audit_id}.json"
+    return audit_id
 
 
 def _write_job(job: dict) -> None:
-    path = _job_path(job["audit_id"])
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(job, indent=2))
-    tmp.replace(path)
+    put_state("audit_jobs", _validate_id(job["audit_id"]), job)
 
 
 def get_job(audit_id: str) -> dict:
-    path = _job_path(audit_id)
-    if not path.exists():
+    audit_id = _validate_id(audit_id)
+    job = get_state("audit_jobs", audit_id)
+    if job is None:
         return {"ok": False, "error": "audit not found", "audit_id": audit_id}
-    return json.loads(path.read_text())
+    return job
 
 
 def _run_job(job: dict) -> None:

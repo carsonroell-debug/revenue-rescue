@@ -18,15 +18,12 @@ from urllib.parse import parse_qs, urlparse
 
 from .audit import WORK_DIR, run_audit
 from .security import validate_public_http_url
+from .storage import get_state, put_state
 
-MONITOR_DIR = WORK_DIR / "monitors"
-MONITOR_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def _path(monitor_id: str) -> Path:
+def _validate_id(monitor_id: str) -> str:
     if not monitor_id or any(ch not in "0123456789abcdef-" for ch in monitor_id.lower()):
         raise ValueError("invalid monitor id")
-    return MONITOR_DIR / f"{monitor_id}.json"
+    return monitor_id
 
 
 def _tracking(url: str | None) -> dict[str, tuple[str, ...]]:
@@ -222,15 +219,16 @@ def create_monitor(
         "last_changes": [],
         "history": [],
     }
-    _path(monitor_id).write_text(json.dumps(monitor, indent=2))
+    put_state("monitors", monitor_id, monitor)
     return monitor
 
 
 def get_monitor(monitor_id: str) -> dict:
-    path = _path(monitor_id)
-    if not path.exists():
+    monitor_id = _validate_id(monitor_id)
+    monitor = get_state("monitors", monitor_id)
+    if monitor is None:
         return {"ok": False, "error": "monitor not found", "monitor_id": monitor_id}
-    return json.loads(path.read_text())
+    return monitor
 
 
 def run_monitor(monitor_id: str) -> dict:
@@ -257,7 +255,7 @@ def run_monitor(monitor_id: str) -> dict:
     monitor["last_run_at"] = run["ran_at"]
     monitor["last_changes"] = changes
     monitor["history"] = (monitor.get("history", []) + [run])[-20:]
-    _path(monitor_id).write_text(json.dumps(monitor, indent=2))
+    put_state("monitors", monitor_id, monitor)
 
     return {
         "ok": True,
