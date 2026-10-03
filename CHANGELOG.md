@@ -4,6 +4,35 @@ All notable changes to Revenue Rescue should be documented here.
 
 The project follows semantic versioning for public releases.
 
+## [Unreleased] - p1/robotstxt-20261003 (robots.txt enforcement, NOT merged to main)
+
+### Why this branch exists
+P1 review-risk fix from the senior audit: Meta's Connector Policies prohibit
+violating robots.txt, and the crawler didn't check it. Built on
+audit/p0-20261003. Nothing here is merged; CI runs on push.
+
+### Added
+- **robots.txt enforcement:** new `revenuerescue/robots.py` — minimal RFC 9309
+  implementation, stdlib only. Per-host `/robots.txt` fetch (via the
+  SSRF-guarded `safe_get`), in-memory cache (1h success / 5min failure),
+  group selection by most-specific user-agent prefix match against our
+  fetcher UA with `*` fallback, path matching with `*` wildcards and `$`
+  end-anchors, longest-match-wins between Allow/Disallow. Failure semantics:
+  unreachable robots.txt -> ALLOW + log (never fail closed).
+- **Enforcement points:** `pick_pages()` filters out disallowed page URLs
+  (logs skips to stderr); `check_link()` returns early with
+  `"skipped: robots.txt disallows this URL"`, which `verdict()` maps to
+  inconclusive -- a robots exclusion is never a finding, consistent with the
+  honest-verdict engine. (+12 tests; suite now 60/60)
+- `test_pick_pages_prioritizes_commercial_urls` now stubs `robots_allowed`
+  (no live robots.txt fetch in tests -- suite stays hermetic).
+
+### What remains (for the next coding agent)
+- robots.txt P1 is DONE on this branch. Remaining P1s: crash recovery for
+  in-flight background jobs; per-user auth story. P2: truth-set labeling,
+  dead-code cleanup. P0s still parked: public HTTPS hosting, support contact,
+  work email, product URL, privacy/terms home.
+
 ## [Unreleased] - audit/p0-20261003 (senior-audit pass, NOT merged to main)
 
 ### Why this branch exists
@@ -48,8 +77,7 @@ implementation. Nothing here is merged; CI runs on push.
   blocker; Meta requires the endpoint live at submission.
 - P0: support contact, work email, product website URL, canonical
   privacy/terms home (see docs/muse/SUBMISSION_CHECKLIST.md).
-- P1: robots.txt enforcement (Meta Policies prohibit violating robots.txt;
-  crawler currently doesn't check it).
+- P1: robots.txt enforcement -- DONE on p1/robotstxt-20261003 (see above).
 - P1: crash recovery for in-flight background jobs (orphaned
   `running`/`queued` jobs after restart need a reaper).
 - P1: per-user auth story (V1 is a single static Bearer token; fine for
