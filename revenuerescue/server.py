@@ -35,7 +35,7 @@ from .errors import invalid_input, not_found, not_ready, rate_limited, unauthori
 from .version import __version__
 from .audit import WORK_DIR
 from .jobs import get_finding, get_findings as get_job_findings
-from .jobs import get_job, start_audit_job
+from .jobs import get_job, reap_orphaned_jobs, start_audit_job
 from .monitoring import create_monitor, get_changes, get_monitor, run_due_monitors, run_monitor
 from .ops import allow_request, log_event, request_id
 from .storage import prune_states_older_than, storage_health
@@ -670,15 +670,20 @@ async def cron_due_monitors(request: Request) -> JSONResponse:
         pruned = await asyncio.to_thread(prune_states_older_than, "audit_jobs")
     except Exception as exc:
         pruned = f"error: {type(exc).__name__}"
+    try:
+        reaped = await asyncio.to_thread(reap_orphaned_jobs)
+    except Exception as exc:
+        reaped = f"error: {type(exc).__name__}"
     log_event(
         "cron_due_monitors_completed",
         request_id=rid,
         due_count=result.get("due_count"),
         ran_count=result.get("ran_count"),
         pruned_audit_jobs=pruned,
+        reaped_jobs=reaped if isinstance(reaped, str) else reaped.get("reaped"),
     )
     return JSONResponse(
-        {**result, "pruned_audit_jobs": pruned, "request_id": rid},
+        {**result, "pruned_audit_jobs": pruned, "reaped_jobs": reaped, "request_id": rid},
         headers={"X-Request-ID": rid},
     )
 
