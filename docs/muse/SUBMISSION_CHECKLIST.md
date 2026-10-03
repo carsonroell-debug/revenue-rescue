@@ -7,9 +7,11 @@ the Connector Policies, and muse.ai/platform.
 ## BLOCKERS (must resolve before submitting)
 
 - [ ] **Hosting: PUBLIC HTTPS ENDPOINT LIVE.** The connector must be reachable
-  from Meta's cloud at submission. Decision is PARKED (Railway ruled out,
-  Fly.io blocked by SSO org, Vercel needs serverless rework). Nothing else
-  below matters until this is resolved.
+  from Meta's cloud at submission. IN PROGRESS 2026-10-03: ChatGPT is
+  deploying to Vercel; that URL will serve as the product website URL for
+  now. Update this line with the live URL when it lands. (Railway ruled out,
+  Fly.io blocked by SSO org.) Nothing else below matters until this is
+  resolved.
 - [x] **Support contact.** `hello@freedomengineers.tech` (default — changeable).
 - [x] **Work email for the submitter.** `hello@freedomengineers.tech`
   (default — changeable).
