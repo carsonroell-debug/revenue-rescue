@@ -38,7 +38,7 @@ from .jobs import get_finding, get_findings as get_job_findings
 from .jobs import get_job, start_audit_job
 from .monitoring import create_monitor, get_changes, get_monitor, run_due_monitors, run_monitor
 from .ops import allow_request, log_event, request_id
-from .storage import storage_health
+from .storage import prune_states_older_than, storage_health
 from .validation import ValidationError, validate_tool_args
 
 ADAPTER = MuseAdapter()
@@ -666,14 +666,19 @@ async def cron_due_monitors(request: Request) -> JSONResponse:
         )
 
     result = await asyncio.to_thread(run_due_monitors, limit=5)
+    try:
+        pruned = await asyncio.to_thread(prune_states_older_than, "audit_jobs")
+    except Exception as exc:
+        pruned = f"error: {type(exc).__name__}"
     log_event(
         "cron_due_monitors_completed",
         request_id=rid,
         due_count=result.get("due_count"),
         ran_count=result.get("ran_count"),
+        pruned_audit_jobs=pruned,
     )
     return JSONResponse(
-        {**result, "request_id": rid},
+        {**result, "pruned_audit_jobs": pruned, "request_id": rid},
         headers={"X-Request-ID": rid},
     )
 

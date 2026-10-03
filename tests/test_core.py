@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -97,6 +98,66 @@ class VerdictTests(unittest.TestCase):
             "error": None,
         }
         self.assertIsNone(audit.verdict(chk))
+
+    def test_503_from_botwall_host_is_inconclusive(self):
+        chk = {
+            "url": "https://www.rei.com/product/123",
+            "chain": [],
+            "final_status": 503,
+            "final_url": "https://www.rei.com/product/123",
+            "error": None,
+        }
+        # Bot-wall hosts serve 503 challenges; never a finding.
+        self.assertIsNone(audit.verdict(chk))
+
+    def test_503_from_ordinary_host_is_a_finding(self):
+        chk = {
+            "url": "https://merchant.test/product/123",
+            "chain": [],
+            "final_status": 503,
+            "final_url": "https://merchant.test/product/123",
+            "error": None,
+        }
+        self.assertEqual(audit.verdict(chk), "destination server error (503)")
+
+
+class FetchUpgradeTests(unittest.TestCase):
+    def test_captcha_upgraded_content_keeps_original(self):
+        class FakeOriginal:
+            status_code = 403
+            text = "forbidden"
+            url = "https://example.test/page"
+
+        class FakeUpgraded:
+            status_code = 200
+            text = "please prove you are human: enter the characters captcha"
+            url = "https://example.test/page"
+            fetch_tier = "scrapling-dynamic"
+
+        original = FakeOriginal()
+        with patch.object(audit, "_scrapling_enabled", return_value=True), \
+             patch.object(audit, "_scrapling_fetch", return_value=FakeUpgraded()):
+            out = audit._maybe_upgrade_fetch("https://example.test/page", original, timeout=5)
+        # A rendered bot-wall must not masquerade as a clean 200.
+        self.assertIs(out, original)
+
+    def test_clean_upgraded_content_is_adopted(self):
+        class FakeOriginal:
+            status_code = 403
+            text = "forbidden"
+            url = "https://example.test/page"
+
+        class FakeUpgraded:
+            status_code = 200
+            text = "<html><body>" + "real content " * 100 + "</body></html>"
+            url = ""
+            fetch_tier = "scrapling-dynamic"
+
+        with patch.object(audit, "_scrapling_enabled", return_value=True), \
+             patch.object(audit, "_scrapling_fetch", return_value=FakeUpgraded()):
+            out = audit._maybe_upgrade_fetch("https://example.test/page", FakeOriginal(), timeout=5)
+        self.assertEqual(out.status_code, 200)
+        self.assertEqual(out.url, "https://example.test/page")
 
 
 class SecurityTests(unittest.TestCase):
@@ -372,6 +433,25 @@ class StorageTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 storage._table("unknown")
 
+    def test_prune_deletes_only_old_audit_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(storage, "DATABASE_URL", ""), patch.object(storage, "STATE_DIR", Path(tmp)):
+                old_id = "00000000-0000-0000-0000-000000000001"
+                new_id = "00000000-0000-0000-0000-000000000002"
+                storage.put_state("audit_jobs", old_id, {"ok": True})
+                storage.put_state("audit_jobs", new_id, {"ok": True})
+                old_path = Path(tmp) / "audit_jobs" / f"{old_id}.json"
+                ancient = time.time() - 100 * 86400
+                os.utime(old_path, (ancient, ancient))
+                deleted = storage.prune_states_older_than("audit_jobs", max_age_days=90)
+                self.assertEqual(deleted, 1)
+                self.assertIsNone(storage.get_state("audit_jobs", old_id))
+                self.assertIsNotNone(storage.get_state("audit_jobs", new_id))
+
+    def test_prune_refuses_non_audit_kinds(self):
+        with self.assertRaises(ValueError):
+            storage.prune_states_older_than("monitors")
+
 
     def test_due_monitor_selection_respects_cadence(self):
         now = 10_000.0
@@ -565,7 +645,10 @@ class PipelineTests(unittest.TestCase):
                 "pages": [{"page": "https://example.com/review", "error": None, "outbound_count": 0}],
                 "link_checks": [],
             }
-            with patch.object(audit, "pick_pages", return_value=["https://example.com/review"]),                  patch.object(audit, "analyze", return_value=fake_results):
+            # run_audit validates the base URL via live DNS; stub it so the
+            # test is hermetic (sandbox/CI DNS may not resolve publicly).
+            with patch.object(audit, "pick_pages", return_value=["https://example.com/review"]),                  patch.object(audit, "analyze", return_value=fake_results),                  patch.object(audit, "validate_public_http_url",
+                               side_effect=lambda url: url):
                 report, path = audit.run_audit(
                     "Example",
                     "https://example.com",
