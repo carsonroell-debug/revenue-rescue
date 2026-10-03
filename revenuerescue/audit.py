@@ -40,6 +40,7 @@ from .commerce import extract_commerce_context
 from .crawler import crawl_pages_sync
 from .evidence import build_finding, looks_like_cta
 from .intelligence import discontinued_offer, dropped_tracking_params, page_priority
+from .robots import is_allowed as robots_allowed
 from .security import UnsafeTarget, safe_get, validate_public_http_url
 
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
@@ -312,16 +313,30 @@ def websearch_review_urls(base, n=8):
     return urls
 
 
+def _robots_filter(urls):
+    """Drop URLs disallowed by the host's robots.txt; log what we skip.
+
+    robots_allowed() is total (fail-open), so this never raises.
+    """
+    kept = []
+    for u in urls:
+        if robots_allowed(u):
+            kept.append(u)
+        else:
+            sys.stderr.write(f"robots.txt: skipping disallowed URL {u}\n")
+    return kept
+
+
 def pick_pages(base, n=8):
     """Prioritize likely monetized pages from the sitemap.
 
     Commercial relevance wins over simple sitemap ordering. Last-modified is
     only a tie-breaker so we spend a small crawl budget on pages most likely to
-    contain revenue paths.
+    contain revenue paths. Pages disallowed by robots.txt are filtered out.
     """
     urls = sitemap_urls(base)
     if not urls:
-        return websearch_review_urls(base, n) or []
+        return _robots_filter(websearch_review_urls(base, n) or [])
 
     candidates = []
     for loc, lm in urls:
@@ -338,7 +353,8 @@ def pick_pages(base, n=8):
 
     candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
     pages = [loc for _, _, loc in candidates[:n]]
-    return pages or websearch_review_urls(base, n)
+    pages = _robots_filter(pages)
+    return pages or _robots_filter(websearch_review_urls(base, n) or [])
 
 
 def _strip_boilerplate(soup):
@@ -447,9 +463,18 @@ def extract_links(page_url, base_host):
 
 def check_link(url, tries=3):
     chain, last_err = [], None
+    try:
+        validate_public_http_url(url)
+    except UnsafeTarget:
+        return {"url": url, "chain": [], "final_status": None, "final_url": None,
+                "error": "unsafe target blocked"}
+    if not robots_allowed(url):
+        # Recorded as inconclusive: verdict() maps any error to None, so a
+        # robots exclusion is never reported as a finding.
+        return {"url": url, "chain": [], "final_status": None, "final_url": None,
+                "error": "skipped: robots.txt disallows this URL"}
     for i in range(tries):
         try:
-            validate_public_http_url(url)
             r = safe_get(url, headers=UA, timeout=20, stream=True)
             for h in r.history:
                 chain.append({"status": h.status_code, "url": h.url})
@@ -457,9 +482,6 @@ def check_link(url, tries=3):
                    "final_url": r.url, "error": None}
             r.close()
             return res
-        except UnsafeTarget:
-            return {"url": url, "chain": [], "final_status": None, "final_url": None,
-                    "error": "unsafe target blocked"}
         except Exception as e:
             last_err = f"{type(e).__name__}"
             chain = []

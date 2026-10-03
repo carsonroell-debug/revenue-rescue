@@ -8,6 +8,7 @@ from unittest.mock import patch
 os.environ["REVENUE_RESCUE_SCRAPLING"] = "0"
 
 from revenuerescue import audit
+from revenuerescue import robots
 from revenuerescue.adapters.muse import MuseAdapter
 from revenuerescue.adapters.openai import OpenAIAdapter
 from revenuerescue.contracts import TOOLS
@@ -160,6 +161,119 @@ class FetchUpgradeTests(unittest.TestCase):
         self.assertEqual(out.url, "https://example.test/page")
 
 
+class FakeLinkResponse:
+    """Minimal requests.Response stand-in for check_link tests."""
+
+    def __init__(self, status_code, url):
+        self.status_code = status_code
+        self.url = url
+        self.history = []
+        self.headers = {}
+
+    def close(self):
+        pass
+
+
+class RobotsTxtTests(unittest.TestCase):
+    def setUp(self):
+        robots.clear_cache()
+
+    def tearDown(self):
+        robots.clear_cache()
+
+    def _fetcher(self, mapping):
+        calls = []
+
+        def fetch(host):
+            calls.append(host)
+            return mapping.get(host)
+
+        fetch.calls = calls
+        return fetch
+
+    def test_disallowed_path_is_not_allowed(self):
+        f = self._fetcher({"example.com": "User-agent: *\nDisallow: /private/\n"})
+        self.assertFalse(robots.is_allowed("https://example.com/private/page", fetcher=f))
+        self.assertTrue(robots.is_allowed("https://example.com/public", fetcher=f))
+
+    def test_specific_ua_group_beats_wildcard(self):
+        # Our fetcher UA starts with "Mozilla/5.0", so the mozilla group is
+        # the most specific match and wins over "*".
+        txt = "User-agent: mozilla\nDisallow: /x\n\nUser-agent: *\nDisallow: /y\n"
+        f = self._fetcher({"example.com": txt})
+        self.assertFalse(robots.is_allowed("https://example.com/x", fetcher=f))
+        self.assertTrue(robots.is_allowed("https://example.com/y", fetcher=f))
+
+    def test_wildcard_group_applies_when_nothing_specific_matches(self):
+        txt = "User-agent: googlebot\nDisallow: /secret\n\nUser-agent: *\nDisallow: /tmp\n"
+        f = self._fetcher({"example.com": txt})
+        self.assertFalse(robots.is_allowed("https://example.com/tmp/f", fetcher=f))
+        self.assertTrue(robots.is_allowed("https://example.com/secret", fetcher=f))
+
+    def test_allow_beats_disallow_on_longest_match(self):
+        txt = "User-agent: *\nDisallow: /private/\nAllow: /private/public/\n"
+        f = self._fetcher({"example.com": txt})
+        self.assertTrue(robots.is_allowed("https://example.com/private/public/p", fetcher=f))
+        self.assertFalse(robots.is_allowed("https://example.com/private/other", fetcher=f))
+
+    def test_star_and_dollar_patterns(self):
+        txt = "User-agent: *\nDisallow: /*?\nDisallow: /tmp$\n"
+        f = self._fetcher({"example.com": txt})
+        self.assertFalse(robots.is_allowed("https://example.com/page?x=1", fetcher=f))
+        self.assertTrue(robots.is_allowed("https://example.com/page", fetcher=f))
+        self.assertFalse(robots.is_allowed("https://example.com/tmp", fetcher=f))
+        self.assertTrue(robots.is_allowed("https://example.com/tmp/", fetcher=f))
+
+    def test_empty_disallow_allows_all(self):
+        f = self._fetcher({"example.com": "User-agent: *\nDisallow:\n"})
+        self.assertTrue(robots.is_allowed("https://example.com/anything", fetcher=f))
+
+    def test_fetch_failure_allows(self):
+        f = self._fetcher({})  # no entry -> robots.txt unreachable
+        self.assertTrue(robots.is_allowed("https://example.com/anything", fetcher=f))
+
+    def test_fetcher_exception_allows(self):
+        def boom(host):
+            raise RuntimeError("dns blew up")
+
+        self.assertTrue(robots.is_allowed("https://example.com/anything", fetcher=boom))
+
+    def test_caching_avoids_refetch(self):
+        f = self._fetcher({"example.com": "User-agent: *\nDisallow: /x\n"})
+        robots.is_allowed("https://example.com/a", fetcher=f)
+        robots.is_allowed("https://example.com/b", fetcher=f)
+        self.assertEqual(f.calls, ["example.com"])
+
+    def test_check_link_skips_disallowed_without_finding(self):
+        with patch.object(audit, "robots_allowed", return_value=False), \
+             patch.object(audit, "validate_public_http_url", side_effect=lambda u: u):
+            chk = audit.check_link("https://example.com/product/1")
+        self.assertIn("robots.txt", chk["error"])
+        self.assertIsNone(chk["final_status"])
+        # Honest-verdict invariant: exclusion is never a finding.
+        self.assertIsNone(audit.verdict(chk))
+
+    def test_check_link_allowed_proceeds(self):
+        resp = FakeLinkResponse(200, "https://example.com/product/1")
+        with patch.object(audit, "robots_allowed", return_value=True), \
+             patch.object(audit, "validate_public_http_url", side_effect=lambda u: u), \
+             patch.object(audit, "safe_get", return_value=resp):
+            chk = audit.check_link("https://example.com/product/1")
+        self.assertEqual(chk["final_status"], 200)
+        self.assertIsNone(chk["error"])
+
+    def test_pick_pages_filters_disallowed(self):
+        sitemap = [
+            ("https://example.com/best-widgets", "2026-10-01"),
+            ("https://example.com/blocked-page", "2026-10-01"),
+        ]
+        with patch.object(audit, "sitemap_urls", return_value=sitemap), \
+             patch.object(audit, "robots_allowed",
+                          side_effect=lambda u: "blocked" not in u):
+            pages = audit.pick_pages("https://example.com", 8)
+        self.assertEqual(pages, ["https://example.com/best-widgets"])
+
+
 class SecurityTests(unittest.TestCase):
     def test_blocks_loopback(self):
         with self.assertRaises(UnsafeTarget):
@@ -232,7 +346,9 @@ class IntelligenceTests(unittest.TestCase):
             ("https://example.com/best-running-shoes", "2025-01-01"),
             ("https://example.com/about", "2026-10-01"),
         ]
-        with patch.object(audit, "sitemap_urls", return_value=sitemap):
+        # robots check is stubbed: no live robots.txt fetch in tests.
+        with patch.object(audit, "sitemap_urls", return_value=sitemap), \
+             patch.object(audit, "robots_allowed", return_value=True):
             pages = audit.pick_pages("https://example.com", 1)
         self.assertEqual(pages, ["https://example.com/best-running-shoes"])
 
