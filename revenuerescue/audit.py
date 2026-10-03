@@ -234,6 +234,13 @@ def _maybe_upgrade_fetch(url, r, timeout):
             else ("dynamic", "stealthy")
         upgraded = _scrapling_fetch(url, timeout=timeout, order=order)
         if upgraded is not None:
+            # Never let a rendered bot-wall masquerade as a clean 200: if the
+            # upgraded content is itself a captcha/challenge page, keep the
+            # original response so downstream verdict logic stays honest.
+            if looks_like_captcha(upgraded.text):
+                sys.stderr.write(f"fetch: scrapling upgrade rejected for {url} "
+                                 f"(trigger={trigger}, upgraded content is captcha)\n")
+                return r
             upgraded.url = getattr(r, "url", url)
             sys.stderr.write(f"fetch: {upgraded.fetch_tier} upgraded {url} "
                              f"(trigger={trigger})\n")
@@ -498,6 +505,8 @@ def verdict(chk, body_sniff=None):
     if fs and fs >= 500:
         if fs == 503 and body_sniff and looks_like_captcha(body_sniff):
             return None
+        if fs == 503 and botwalled(chk["url"]):
+            return None  # bot-wall hosts serve 503 challenges; inconclusive
         return f"destination server error ({fs})"
     if fs == 403:
         return None  # likely bot-wall, inconclusive
