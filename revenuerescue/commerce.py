@@ -93,15 +93,3 @@ def extract_commerce_context(soup: BeautifulSoup) -> dict:
         "offers": offers[:20],
         "meta": meta,
     }
-
-
-def commerce_weight(context: dict) -> int:
-    """Return a small deterministic boost for commercially explicit pages."""
-    score = 0
-    if context.get("has_product_schema"):
-        score += 5
-    if context.get("has_offer_schema"):
-        score += 5
-    if context.get("offers"):
-        score += 3
-    return min(score, 12)

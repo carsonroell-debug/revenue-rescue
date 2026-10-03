@@ -4,6 +4,38 @@ All notable changes to Revenue Rescue should be documented here.
 
 The project follows semantic versioning for public releases.
 
+## [Unreleased] - p1/jobs-cleanup-20261003 (job reaper + dead-code cleanup, NOT merged to main)
+
+### Why this branch exists
+P1 hardening from the senior audit, built on p1/robotstxt-20261003: (a) crash
+recovery for background jobs — stuck queued/running jobs wedged the queue
+silently; (b) dead-code cleanup of three verified-dead items. Nothing here is
+merged; CI runs on push.
+
+### Added
+- **Job reaper (`reap_orphaned_jobs` in `revenuerescue/jobs.py`):** marks jobs
+  stuck in `queued`/`created_at`-stale or `running`/`started_at`-stale past a
+  30-minute threshold (injectable `now`/`threshold_seconds` for tests) as
+  `failed` with a clear "orphaned" reason. No new states introduced; reaped
+  jobs carry no findings (honest-verdict discipline). Every reaped job is
+  logged via `log_event("job_reaped", ...)`. Wired into the existing
+  `/internal/cron/due-monitors` endpoint alongside retention pruning, and
+  reported in its response as `reaped_jobs`. (+6 tests; suite now 66/66)
+
+### Removed
+- `commerce_weight()` from `revenuerescue/commerce.py` — verified zero callers;
+  `extract_commerce_context()` (the used entry point) untouched.
+- Stale `__version__ = "0.1.0"` from `revenuerescue/__init__.py` —
+  `revenuerescue/version.py` (0.4.0) is the single source of truth; everything
+  (server, release_check, tests) already imports from there.
+- Dead `--port 8787` flag from `run.sh` — `server.main()` takes no CLI args and
+  there is no argparse; the flag was silently ignored. Port comes from the
+  `PORT` env var (default 8787) via `RuntimeConfig`; run.sh documents this now.
+
+### What remains (for the next coding agent)
+- Merge order (needs the user's word): audit/p0-20261003 -> p1/robotstxt-20261003
+  -> p1/jobs-cleanup-20261003. Each is a clean fast-forward of the previous.
+
 ## [Unreleased] - p1/robotstxt-20261003 (robots.txt enforcement, NOT merged to main)
 
 ### Why this branch exists

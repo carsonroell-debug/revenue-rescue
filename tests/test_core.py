@@ -18,6 +18,7 @@ from revenuerescue.evidence import build_finding, tracking_evidence
 from revenuerescue.intelligence import discontinued_offer, page_priority
 from revenuerescue.security import UnsafeTarget, validate_public_http_url
 from revenuerescue.jobs import get_finding, get_findings as get_job_findings
+from revenuerescue.jobs import reap_orphaned_jobs
 from revenuerescue.monitoring import diff_snapshots, due_monitors, snapshot_from_report
 from revenuerescue.server import openapi_spec
 from revenuerescue.config import RuntimeConfig
@@ -599,6 +600,143 @@ class JobContractTests(unittest.TestCase):
         result = get_job_findings("00000000-0000-0000-0000-000000000000")
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "audit not found")
+
+
+class ReaperTests(unittest.TestCase):
+    """Crash recovery: jobs stuck in queued/running get released as failed.
+
+    All hermetic: temp STATE_DIR, injected ``now`` and thresholds — no
+    sleeping, no live network, no real executor involvement.
+    """
+
+    def _seed(self, tmp, jobs):
+        from revenuerescue import storage as _storage
+
+        with patch.object(_storage, "DATABASE_URL", ""), patch.object(
+            _storage, "STATE_DIR", Path(tmp)
+        ):
+            for job in jobs:
+                _storage.put_state("audit_jobs", job["audit_id"], job)
+
+    def _reap(self, tmp, **kwargs):
+        from revenuerescue import storage as _storage
+
+        with patch.object(_storage, "DATABASE_URL", ""), patch.object(
+            _storage, "STATE_DIR", Path(tmp)
+        ):
+            return reap_orphaned_jobs(**kwargs)
+
+    def _load(self, tmp, audit_id):
+        from revenuerescue import storage as _storage
+
+        with patch.object(_storage, "DATABASE_URL", ""), patch.object(
+            _storage, "STATE_DIR", Path(tmp)
+        ):
+            return _storage.get_state("audit_jobs", audit_id)
+
+    def _job(self, audit_id, status, **fields):
+        job = {
+            "ok": True,
+            "audit_id": audit_id,
+            "status": status,
+            "site_name": "example",
+            "base_url": "https://example.com",
+            "max_pages": 8,
+        }
+        job.update(fields)
+        return job
+
+    def test_old_running_job_is_reaped_as_failed(self):
+        now = 100_000.0
+        rid = "00000000-0000-0000-0000-0000000000a1"
+        with tempfile.TemporaryDirectory() as tmp:
+            self._seed(tmp, [
+                self._job(rid, "running", created_at=now - 7200,
+                          started_at=now - 3600),
+            ])
+            out = self._reap(tmp, now=now, threshold_seconds=1800)
+            self.assertTrue(out["ok"])
+            self.assertEqual(out["reaped"], 1)
+            self.assertEqual(out["audit_ids"], [rid])
+            job = self._load(tmp, rid)
+            self.assertEqual(job["status"], "failed")
+            self.assertFalse(job["ok"])
+            self.assertIn("orphaned", job["error"])
+            self.assertIn("running", job["error"])
+            self.assertEqual(job["completed_at"], now)
+
+    def test_old_queued_job_is_reaped(self):
+        now = 100_000.0
+        rid = "00000000-0000-0000-0000-0000000000a2"
+        with tempfile.TemporaryDirectory() as tmp:
+            self._seed(tmp, [
+                self._job(rid, "queued", created_at=now - 7200),
+            ])
+            out = self._reap(tmp, now=now, threshold_seconds=1800)
+            self.assertEqual(out["reaped"], 1)
+            job = self._load(tmp, rid)
+            self.assertEqual(job["status"], "failed")
+            self.assertIn("queued", job["error"])
+
+    def test_fresh_jobs_are_untouched(self):
+        now = 100_000.0
+        running_id = "00000000-0000-0000-0000-0000000000b1"
+        queued_id = "00000000-0000-0000-0000-0000000000b2"
+        with tempfile.TemporaryDirectory() as tmp:
+            self._seed(tmp, [
+                self._job(running_id, "running", created_at=now - 600,
+                          started_at=now - 60),
+                self._job(queued_id, "queued", created_at=now - 60),
+            ])
+            out = self._reap(tmp, now=now, threshold_seconds=1800)
+            self.assertEqual(out["reaped"], 0)
+            self.assertEqual(out["audit_ids"], [])
+            self.assertEqual(self._load(tmp, running_id)["status"], "running")
+            self.assertEqual(self._load(tmp, queued_id)["status"], "queued")
+
+    def test_terminal_jobs_are_untouched(self):
+        now = 100_000.0
+        done_id = "00000000-0000-0000-0000-0000000000c1"
+        failed_id = "00000000-0000-0000-0000-0000000000c2"
+        with tempfile.TemporaryDirectory() as tmp:
+            self._seed(tmp, [
+                self._job(done_id, "completed", created_at=now - 7200,
+                          started_at=now - 7100, completed_at=now - 7000),
+                self._job(failed_id, "failed", created_at=now - 7200,
+                          completed_at=now - 7000, error="boom"),
+            ])
+            out = self._reap(tmp, now=now, threshold_seconds=1800)
+            self.assertEqual(out["reaped"], 0)
+            self.assertEqual(self._load(tmp, done_id)["status"], "completed")
+            failed = self._load(tmp, failed_id)
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(failed["error"], "boom")
+
+    def test_running_job_missing_started_at_is_reaped(self):
+        # A partial/corrupt write can never make progress.
+        now = 100_000.0
+        rid = "00000000-0000-0000-0000-0000000000d1"
+        with tempfile.TemporaryDirectory() as tmp:
+            self._seed(tmp, [self._job(rid, "running", created_at=now - 60)])
+            out = self._reap(tmp, now=now, threshold_seconds=1800)
+            self.assertEqual(out["reaped"], 1)
+            job = self._load(tmp, rid)
+            self.assertEqual(job["status"], "failed")
+            self.assertIn("unknown duration", job["error"])
+
+    def test_reaped_error_never_claims_a_finding(self):
+        # Honest-verdict discipline: an orphaned job is a failure, not a result.
+        now = 100_000.0
+        rid = "00000000-0000-0000-0000-0000000000e1"
+        with tempfile.TemporaryDirectory() as tmp:
+            self._seed(tmp, [
+                self._job(rid, "running", created_at=now - 7200,
+                          started_at=now - 3600),
+            ])
+            self._reap(tmp, now=now, threshold_seconds=1800)
+            job = self._load(tmp, rid)
+            self.assertNotIn("findings", job)
+            self.assertFalse(job.get("ok"))
 
 
     def test_get_finding_explains_evidence(self):
