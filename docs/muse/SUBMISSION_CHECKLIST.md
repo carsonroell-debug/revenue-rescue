@@ -10,14 +10,16 @@ the Connector Policies, and muse.ai/platform.
   from Meta's cloud at submission. Decision is PARKED (Railway ruled out,
   Fly.io blocked by SSO org, Vercel needs serverless rework). Nothing else
   below matters until this is resolved.
-- [ ] **Support contact.** Form requires a support email or URL. Not chosen.
-- [ ] **Work email for the submitter.** Sign-in uses a work email on a Muse
-  account. (hello@freedomengineers.tech is the natural candidate — confirm.)
+- [x] **Support contact.** `hello@freedomengineers.tech` (default — changeable).
+- [x] **Work email for the submitter.** `hello@freedomengineers.tech`
+  (default — changeable).
 - [ ] **Product website URL.** Form requires it. (freedomengineers.tech or a
   dedicated page — confirm.)
-- [ ] **Privacy policy + Terms URLs.** Drafts exist (`docs/privacy.md`,
-  `docs/terms.md` with public raw-GitHub URLs). Decide the canonical home
-  (product site vs. GitHub Pages) and point the form at it.
+- [x] **Privacy policy + Terms URLs.** Canonical home: the public raw-GitHub
+  URLs (already live):
+  - Privacy: `https://raw.githubusercontent.com/carsonroell-debug/revenue-rescue/main/docs/privacy.md`
+  - Terms: `https://raw.githubusercontent.com/carsonroell-debug/revenue-rescue/main/docs/terms.md`
+  (Revisit if a product site ships.)
 
 ## Form fields — readiness
 
@@ -32,10 +34,10 @@ the Connector Policies, and muse.ai/platform.
 | Icon 512×512 PNG/SVG ≤256 KiB | exists: `submission/icon_512.png` — verify dimensions/size |
 | Payments | "Does not accept payments" ✓ |
 | Submitter name | to confirm |
-| Work email | BLOCKER (see above) |
-| Support email/URL | BLOCKER (see above) |
-| Privacy policy URL | draft exists — BLOCKER on canonical home |
-| Terms of service URL | draft exists — BLOCKER on canonical home |
+| Work email | `hello@freedomengineers.tech` (default — changeable) |
+| Support email/URL | `hello@freedomengineers.tech` (default — changeable) |
+| Privacy policy URL | `https://raw.githubusercontent.com/carsonroell-debug/revenue-rescue/main/docs/privacy.md` ✓ |
+| Terms of service URL | `https://raw.githubusercontent.com/carsonroell-debug/revenue-rescue/main/docs/terms.md` ✓ |
 | "Anything else?" | reviewer text drafted in REVIEWER_GUIDE.md ✓ |
 
 ## Pre-submit QA (from TEST_PLAN.md)
