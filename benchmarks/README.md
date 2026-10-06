@@ -13,13 +13,13 @@ Create a JSONL truth set with one row per evaluation case:
 Run:
 
 ```bash
-python scripts/benchmark.py benchmarks/truth-set.jsonl
+python scripts/benchmark.py benchmarks/sample.jsonl
 ```
 
 Optional release gates:
 
 ```bash
-python scripts/benchmark.py benchmarks/truth-set.jsonl --min-precision 0.95 --min-recall 0.85
+python scripts/benchmark.py benchmarks/sample.jsonl --min-precision 0.95 --min-recall 0.85
 ```
 
 ## Labeling rules
