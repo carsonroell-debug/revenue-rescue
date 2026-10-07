@@ -48,7 +48,11 @@ UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 WORK_DIR = BASE_DIR / "work"
-WORK_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    WORK_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    # Read-only serverless filesystem (e.g. Vercel): skip eager creation.
+    pass
 
 AFFILIATE_PATTERNS = [
     r"amzn\.to", r"amazon\.", r"go\.skimresources\.com", r"skimlinks",

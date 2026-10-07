@@ -18,7 +18,12 @@ from psycopg.types.json import Jsonb
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATE_DIR = BASE_DIR / "work" / "state"
-STATE_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    # Read-only serverless filesystem: state falls back to unavailable;
+    # storage_health() already reports this gracefully at runtime.
+    pass
 
 DATABASE_URL = (
     os.environ.get("DATABASE_URL", "").strip()
