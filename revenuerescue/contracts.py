@@ -146,6 +146,15 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "health_check",
+        "description": "Check whether Revenue Rescue is online and ready for tool calls.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
 ]
 
 

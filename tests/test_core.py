@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -7,6 +8,7 @@ from unittest.mock import patch
 os.environ["REVENUE_RESCUE_SCRAPLING"] = "0"
 
 from revenuerescue import audit
+from revenuerescue import robots
 from revenuerescue.adapters.muse import MuseAdapter
 from revenuerescue.adapters.openai import OpenAIAdapter
 from revenuerescue.contracts import TOOLS
@@ -16,6 +18,7 @@ from revenuerescue.evidence import build_finding, tracking_evidence
 from revenuerescue.intelligence import discontinued_offer, page_priority
 from revenuerescue.security import UnsafeTarget, validate_public_http_url
 from revenuerescue.jobs import get_finding, get_findings as get_job_findings
+from revenuerescue.jobs import reap_orphaned_jobs
 from revenuerescue.monitoring import diff_snapshots, due_monitors, snapshot_from_report
 from revenuerescue.server import openapi_spec
 from revenuerescue.config import RuntimeConfig
@@ -98,6 +101,179 @@ class VerdictTests(unittest.TestCase):
         }
         self.assertIsNone(audit.verdict(chk))
 
+    def test_503_from_botwall_host_is_inconclusive(self):
+        chk = {
+            "url": "https://www.rei.com/product/123",
+            "chain": [],
+            "final_status": 503,
+            "final_url": "https://www.rei.com/product/123",
+            "error": None,
+        }
+        # Bot-wall hosts serve 503 challenges; never a finding.
+        self.assertIsNone(audit.verdict(chk))
+
+    def test_503_from_ordinary_host_is_a_finding(self):
+        chk = {
+            "url": "https://merchant.test/product/123",
+            "chain": [],
+            "final_status": 503,
+            "final_url": "https://merchant.test/product/123",
+            "error": None,
+        }
+        self.assertEqual(audit.verdict(chk), "destination server error (503)")
+
+
+class FetchUpgradeTests(unittest.TestCase):
+    def test_captcha_upgraded_content_keeps_original(self):
+        class FakeOriginal:
+            status_code = 403
+            text = "forbidden"
+            url = "https://example.test/page"
+
+        class FakeUpgraded:
+            status_code = 200
+            text = "please prove you are human: enter the characters captcha"
+            url = "https://example.test/page"
+            fetch_tier = "scrapling-dynamic"
+
+        original = FakeOriginal()
+        with patch.object(audit, "_scrapling_enabled", return_value=True), \
+             patch.object(audit, "_scrapling_fetch", return_value=FakeUpgraded()):
+            out = audit._maybe_upgrade_fetch("https://example.test/page", original, timeout=5)
+        # A rendered bot-wall must not masquerade as a clean 200.
+        self.assertIs(out, original)
+
+    def test_clean_upgraded_content_is_adopted(self):
+        class FakeOriginal:
+            status_code = 403
+            text = "forbidden"
+            url = "https://example.test/page"
+
+        class FakeUpgraded:
+            status_code = 200
+            text = "<html><body>" + "real content " * 100 + "</body></html>"
+            url = ""
+            fetch_tier = "scrapling-dynamic"
+
+        with patch.object(audit, "_scrapling_enabled", return_value=True), \
+             patch.object(audit, "_scrapling_fetch", return_value=FakeUpgraded()):
+            out = audit._maybe_upgrade_fetch("https://example.test/page", FakeOriginal(), timeout=5)
+        self.assertEqual(out.status_code, 200)
+        self.assertEqual(out.url, "https://example.test/page")
+
+
+class FakeLinkResponse:
+    """Minimal requests.Response stand-in for check_link tests."""
+
+    def __init__(self, status_code, url):
+        self.status_code = status_code
+        self.url = url
+        self.history = []
+        self.headers = {}
+
+    def close(self):
+        pass
+
+
+class RobotsTxtTests(unittest.TestCase):
+    def setUp(self):
+        robots.clear_cache()
+
+    def tearDown(self):
+        robots.clear_cache()
+
+    def _fetcher(self, mapping):
+        calls = []
+
+        def fetch(host):
+            calls.append(host)
+            return mapping.get(host)
+
+        fetch.calls = calls
+        return fetch
+
+    def test_disallowed_path_is_not_allowed(self):
+        f = self._fetcher({"example.com": "User-agent: *\nDisallow: /private/\n"})
+        self.assertFalse(robots.is_allowed("https://example.com/private/page", fetcher=f))
+        self.assertTrue(robots.is_allowed("https://example.com/public", fetcher=f))
+
+    def test_specific_ua_group_beats_wildcard(self):
+        # Our fetcher UA starts with "Mozilla/5.0", so the mozilla group is
+        # the most specific match and wins over "*".
+        txt = "User-agent: mozilla\nDisallow: /x\n\nUser-agent: *\nDisallow: /y\n"
+        f = self._fetcher({"example.com": txt})
+        self.assertFalse(robots.is_allowed("https://example.com/x", fetcher=f))
+        self.assertTrue(robots.is_allowed("https://example.com/y", fetcher=f))
+
+    def test_wildcard_group_applies_when_nothing_specific_matches(self):
+        txt = "User-agent: googlebot\nDisallow: /secret\n\nUser-agent: *\nDisallow: /tmp\n"
+        f = self._fetcher({"example.com": txt})
+        self.assertFalse(robots.is_allowed("https://example.com/tmp/f", fetcher=f))
+        self.assertTrue(robots.is_allowed("https://example.com/secret", fetcher=f))
+
+    def test_allow_beats_disallow_on_longest_match(self):
+        txt = "User-agent: *\nDisallow: /private/\nAllow: /private/public/\n"
+        f = self._fetcher({"example.com": txt})
+        self.assertTrue(robots.is_allowed("https://example.com/private/public/p", fetcher=f))
+        self.assertFalse(robots.is_allowed("https://example.com/private/other", fetcher=f))
+
+    def test_star_and_dollar_patterns(self):
+        txt = "User-agent: *\nDisallow: /*?\nDisallow: /tmp$\n"
+        f = self._fetcher({"example.com": txt})
+        self.assertFalse(robots.is_allowed("https://example.com/page?x=1", fetcher=f))
+        self.assertTrue(robots.is_allowed("https://example.com/page", fetcher=f))
+        self.assertFalse(robots.is_allowed("https://example.com/tmp", fetcher=f))
+        self.assertTrue(robots.is_allowed("https://example.com/tmp/", fetcher=f))
+
+    def test_empty_disallow_allows_all(self):
+        f = self._fetcher({"example.com": "User-agent: *\nDisallow:\n"})
+        self.assertTrue(robots.is_allowed("https://example.com/anything", fetcher=f))
+
+    def test_fetch_failure_allows(self):
+        f = self._fetcher({})  # no entry -> robots.txt unreachable
+        self.assertTrue(robots.is_allowed("https://example.com/anything", fetcher=f))
+
+    def test_fetcher_exception_allows(self):
+        def boom(host):
+            raise RuntimeError("dns blew up")
+
+        self.assertTrue(robots.is_allowed("https://example.com/anything", fetcher=boom))
+
+    def test_caching_avoids_refetch(self):
+        f = self._fetcher({"example.com": "User-agent: *\nDisallow: /x\n"})
+        robots.is_allowed("https://example.com/a", fetcher=f)
+        robots.is_allowed("https://example.com/b", fetcher=f)
+        self.assertEqual(f.calls, ["example.com"])
+
+    def test_check_link_skips_disallowed_without_finding(self):
+        with patch.object(audit, "robots_allowed", return_value=False), \
+             patch.object(audit, "validate_public_http_url", side_effect=lambda u: u):
+            chk = audit.check_link("https://example.com/product/1")
+        self.assertIn("robots.txt", chk["error"])
+        self.assertIsNone(chk["final_status"])
+        # Honest-verdict invariant: exclusion is never a finding.
+        self.assertIsNone(audit.verdict(chk))
+
+    def test_check_link_allowed_proceeds(self):
+        resp = FakeLinkResponse(200, "https://example.com/product/1")
+        with patch.object(audit, "robots_allowed", return_value=True), \
+             patch.object(audit, "validate_public_http_url", side_effect=lambda u: u), \
+             patch.object(audit, "safe_get", return_value=resp):
+            chk = audit.check_link("https://example.com/product/1")
+        self.assertEqual(chk["final_status"], 200)
+        self.assertIsNone(chk["error"])
+
+    def test_pick_pages_filters_disallowed(self):
+        sitemap = [
+            ("https://example.com/best-widgets", "2026-10-01"),
+            ("https://example.com/blocked-page", "2026-10-01"),
+        ]
+        with patch.object(audit, "sitemap_urls", return_value=sitemap), \
+             patch.object(audit, "robots_allowed",
+                          side_effect=lambda u: "blocked" not in u):
+            pages = audit.pick_pages("https://example.com", 8)
+        self.assertEqual(pages, ["https://example.com/best-widgets"])
+
 
 class SecurityTests(unittest.TestCase):
     def test_blocks_loopback(self):
@@ -171,7 +347,9 @@ class IntelligenceTests(unittest.TestCase):
             ("https://example.com/best-running-shoes", "2025-01-01"),
             ("https://example.com/about", "2026-10-01"),
         ]
-        with patch.object(audit, "sitemap_urls", return_value=sitemap):
+        # robots check is stubbed: no live robots.txt fetch in tests.
+        with patch.object(audit, "sitemap_urls", return_value=sitemap), \
+             patch.object(audit, "robots_allowed", return_value=True):
             pages = audit.pick_pages("https://example.com", 1)
         self.assertEqual(pages, ["https://example.com/best-running-shoes"])
 
@@ -372,6 +550,25 @@ class StorageTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 storage._table("unknown")
 
+    def test_prune_deletes_only_old_audit_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(storage, "DATABASE_URL", ""), patch.object(storage, "STATE_DIR", Path(tmp)):
+                old_id = "00000000-0000-0000-0000-000000000001"
+                new_id = "00000000-0000-0000-0000-000000000002"
+                storage.put_state("audit_jobs", old_id, {"ok": True})
+                storage.put_state("audit_jobs", new_id, {"ok": True})
+                old_path = Path(tmp) / "audit_jobs" / f"{old_id}.json"
+                ancient = time.time() - 100 * 86400
+                os.utime(old_path, (ancient, ancient))
+                deleted = storage.prune_states_older_than("audit_jobs", max_age_days=90)
+                self.assertEqual(deleted, 1)
+                self.assertIsNone(storage.get_state("audit_jobs", old_id))
+                self.assertIsNotNone(storage.get_state("audit_jobs", new_id))
+
+    def test_prune_refuses_non_audit_kinds(self):
+        with self.assertRaises(ValueError):
+            storage.prune_states_older_than("monitors")
+
 
     def test_due_monitor_selection_respects_cadence(self):
         now = 10_000.0
@@ -403,6 +600,143 @@ class JobContractTests(unittest.TestCase):
         result = get_job_findings("00000000-0000-0000-0000-000000000000")
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "audit not found")
+
+
+class ReaperTests(unittest.TestCase):
+    """Crash recovery: jobs stuck in queued/running get released as failed.
+
+    All hermetic: temp STATE_DIR, injected ``now`` and thresholds — no
+    sleeping, no live network, no real executor involvement.
+    """
+
+    def _seed(self, tmp, jobs):
+        from revenuerescue import storage as _storage
+
+        with patch.object(_storage, "DATABASE_URL", ""), patch.object(
+            _storage, "STATE_DIR", Path(tmp)
+        ):
+            for job in jobs:
+                _storage.put_state("audit_jobs", job["audit_id"], job)
+
+    def _reap(self, tmp, **kwargs):
+        from revenuerescue import storage as _storage
+
+        with patch.object(_storage, "DATABASE_URL", ""), patch.object(
+            _storage, "STATE_DIR", Path(tmp)
+        ):
+            return reap_orphaned_jobs(**kwargs)
+
+    def _load(self, tmp, audit_id):
+        from revenuerescue import storage as _storage
+
+        with patch.object(_storage, "DATABASE_URL", ""), patch.object(
+            _storage, "STATE_DIR", Path(tmp)
+        ):
+            return _storage.get_state("audit_jobs", audit_id)
+
+    def _job(self, audit_id, status, **fields):
+        job = {
+            "ok": True,
+            "audit_id": audit_id,
+            "status": status,
+            "site_name": "example",
+            "base_url": "https://example.com",
+            "max_pages": 8,
+        }
+        job.update(fields)
+        return job
+
+    def test_old_running_job_is_reaped_as_failed(self):
+        now = 100_000.0
+        rid = "00000000-0000-0000-0000-0000000000a1"
+        with tempfile.TemporaryDirectory() as tmp:
+            self._seed(tmp, [
+                self._job(rid, "running", created_at=now - 7200,
+                          started_at=now - 3600),
+            ])
+            out = self._reap(tmp, now=now, threshold_seconds=1800)
+            self.assertTrue(out["ok"])
+            self.assertEqual(out["reaped"], 1)
+            self.assertEqual(out["audit_ids"], [rid])
+            job = self._load(tmp, rid)
+            self.assertEqual(job["status"], "failed")
+            self.assertFalse(job["ok"])
+            self.assertIn("orphaned", job["error"])
+            self.assertIn("running", job["error"])
+            self.assertEqual(job["completed_at"], now)
+
+    def test_old_queued_job_is_reaped(self):
+        now = 100_000.0
+        rid = "00000000-0000-0000-0000-0000000000a2"
+        with tempfile.TemporaryDirectory() as tmp:
+            self._seed(tmp, [
+                self._job(rid, "queued", created_at=now - 7200),
+            ])
+            out = self._reap(tmp, now=now, threshold_seconds=1800)
+            self.assertEqual(out["reaped"], 1)
+            job = self._load(tmp, rid)
+            self.assertEqual(job["status"], "failed")
+            self.assertIn("queued", job["error"])
+
+    def test_fresh_jobs_are_untouched(self):
+        now = 100_000.0
+        running_id = "00000000-0000-0000-0000-0000000000b1"
+        queued_id = "00000000-0000-0000-0000-0000000000b2"
+        with tempfile.TemporaryDirectory() as tmp:
+            self._seed(tmp, [
+                self._job(running_id, "running", created_at=now - 600,
+                          started_at=now - 60),
+                self._job(queued_id, "queued", created_at=now - 60),
+            ])
+            out = self._reap(tmp, now=now, threshold_seconds=1800)
+            self.assertEqual(out["reaped"], 0)
+            self.assertEqual(out["audit_ids"], [])
+            self.assertEqual(self._load(tmp, running_id)["status"], "running")
+            self.assertEqual(self._load(tmp, queued_id)["status"], "queued")
+
+    def test_terminal_jobs_are_untouched(self):
+        now = 100_000.0
+        done_id = "00000000-0000-0000-0000-0000000000c1"
+        failed_id = "00000000-0000-0000-0000-0000000000c2"
+        with tempfile.TemporaryDirectory() as tmp:
+            self._seed(tmp, [
+                self._job(done_id, "completed", created_at=now - 7200,
+                          started_at=now - 7100, completed_at=now - 7000),
+                self._job(failed_id, "failed", created_at=now - 7200,
+                          completed_at=now - 7000, error="boom"),
+            ])
+            out = self._reap(tmp, now=now, threshold_seconds=1800)
+            self.assertEqual(out["reaped"], 0)
+            self.assertEqual(self._load(tmp, done_id)["status"], "completed")
+            failed = self._load(tmp, failed_id)
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(failed["error"], "boom")
+
+    def test_running_job_missing_started_at_is_reaped(self):
+        # A partial/corrupt write can never make progress.
+        now = 100_000.0
+        rid = "00000000-0000-0000-0000-0000000000d1"
+        with tempfile.TemporaryDirectory() as tmp:
+            self._seed(tmp, [self._job(rid, "running", created_at=now - 60)])
+            out = self._reap(tmp, now=now, threshold_seconds=1800)
+            self.assertEqual(out["reaped"], 1)
+            job = self._load(tmp, rid)
+            self.assertEqual(job["status"], "failed")
+            self.assertIn("unknown duration", job["error"])
+
+    def test_reaped_error_never_claims_a_finding(self):
+        # Honest-verdict discipline: an orphaned job is a failure, not a result.
+        now = 100_000.0
+        rid = "00000000-0000-0000-0000-0000000000e1"
+        with tempfile.TemporaryDirectory() as tmp:
+            self._seed(tmp, [
+                self._job(rid, "running", created_at=now - 7200,
+                          started_at=now - 3600),
+            ])
+            self._reap(tmp, now=now, threshold_seconds=1800)
+            job = self._load(tmp, rid)
+            self.assertNotIn("findings", job)
+            self.assertFalse(job.get("ok"))
 
 
     def test_get_finding_explains_evidence(self):
@@ -565,7 +899,10 @@ class PipelineTests(unittest.TestCase):
                 "pages": [{"page": "https://example.com/review", "error": None, "outbound_count": 0}],
                 "link_checks": [],
             }
-            with patch.object(audit, "pick_pages", return_value=["https://example.com/review"]),                  patch.object(audit, "analyze", return_value=fake_results):
+            # run_audit validates the base URL via live DNS; stub it so the
+            # test is hermetic (sandbox/CI DNS may not resolve publicly).
+            with patch.object(audit, "pick_pages", return_value=["https://example.com/review"]),                  patch.object(audit, "analyze", return_value=fake_results),                  patch.object(audit, "validate_public_http_url",
+                               side_effect=lambda url: url):
                 report, path = audit.run_audit(
                     "Example",
                     "https://example.com",

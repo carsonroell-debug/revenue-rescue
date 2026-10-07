@@ -25,6 +25,10 @@ DATABASE_URL = (
     or os.environ.get("SUPABASE_DB_URL", "").strip()
 )
 
+# Retention policy: completed audit reports are ephemeral working data, not a
+# permanent archive. Anything older than this is pruned by the cron endpoint.
+DEFAULT_RETENTION_DAYS = 90
+
 
 def using_postgres() -> bool:
     return bool(DATABASE_URL)
@@ -103,6 +107,41 @@ def delete_state(kind: str, key: str) -> bool:
         with conn.cursor() as cur:
             cur.execute(f"delete from {table} where id = %s::uuid", (key,))
             return cur.rowcount > 0
+
+
+def prune_states_older_than(kind: str, max_age_days: int = DEFAULT_RETENTION_DAYS) -> int:
+    """Delete state objects older than max_age_days. Returns count deleted.
+
+    Only audit job records are pruned (ephemeral working data). Monitor
+    configurations are user-owned recurring watches and are never pruned here.
+    """
+    import time
+
+    if kind != "audit_jobs":
+        raise ValueError("retention pruning applies to audit_jobs only")
+    cutoff = time.time() - max_age_days * 86400
+    if not using_postgres():
+        folder = STATE_DIR / "".join(ch for ch in kind.lower() if ch.isalnum() or ch in "_-")
+        if not folder.exists():
+            return 0
+        deleted = 0
+        for path in folder.glob("*.json"):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    deleted += 1
+            except OSError:
+                continue
+        return deleted
+
+    table = _table(kind)
+    with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"delete from {table} where updated_at < now() - make_interval(days => %s)",
+                (max_age_days,),
+            )
+            return cur.rowcount
 
 
 def list_state(kind: str, *, limit: int = 500) -> list[dict[str, Any]]:

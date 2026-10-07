@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Production HTTP surface for Revenue Rescue.
+"""Production HTTP surface for LinkRescue.
 
 This module serves two interfaces from one ASGI process:
 
@@ -35,10 +35,10 @@ from .errors import invalid_input, not_found, not_ready, rate_limited, unauthori
 from .version import __version__
 from .audit import WORK_DIR
 from .jobs import get_finding, get_findings as get_job_findings
-from .jobs import get_job, start_audit_job
+from .jobs import get_job, reap_orphaned_jobs, start_audit_job
 from .monitoring import create_monitor, get_changes, get_monitor, run_due_monitors, run_monitor
 from .ops import allow_request, log_event, request_id
-from .storage import storage_health
+from .storage import prune_states_older_than, storage_health
 from .validation import ValidationError, validate_tool_args
 
 ADAPTER = MuseAdapter()
@@ -60,9 +60,9 @@ def _build_mcp() -> FastMCP:
         )
 
     server = FastMCP(
-        "Revenue Rescue",
+        "LinkRescue",
         instructions=(
-            "Use Revenue Rescue to audit publisher and commerce websites for "
+            "Use LinkRescue to audit publisher and commerce websites for "
             "confirmed revenue leaks such as dead affiliate destinations, "
             "tracking loss, soft-404 product redirects, and unhealthy redirect "
             "chains. Do not describe bot blocks or timeouts as confirmed leaks."
@@ -133,7 +133,7 @@ def _build_mcp() -> FastMCP:
 
     @server.tool
     async def explain_finding(audit_id: str, finding_id: str) -> dict:
-        """Explain one Revenue Rescue finding with its evidence and recommended action."""
+        """Explain one LinkRescue finding with its evidence and recommended action."""
         try:
             return get_finding(audit_id, finding_id)
         except Exception as exc:
@@ -195,7 +195,7 @@ def _build_mcp() -> FastMCP:
 
     @server.tool
     async def get_monitor_changes(monitor_id: str) -> dict:
-        """Return the latest evidence changes detected by a Revenue Rescue monitor."""
+        """Return the latest evidence changes detected by a LinkRescue monitor."""
         try:
             return get_changes(monitor_id)
         except Exception as exc:
@@ -203,10 +203,10 @@ def _build_mcp() -> FastMCP:
 
     @server.tool
     async def health_check() -> dict:
-        """Check whether Revenue Rescue is online and ready for tool calls."""
+        """Check whether LinkRescue is online and ready for tool calls."""
         return {
             "ok": True,
-            "service": "revenue-rescue",
+            "service": "linkrescue",
             "mcp": "fastmcp-4",
             "auth_enabled": bool(API_TOKEN),
         }
@@ -248,7 +248,7 @@ def openapi_spec(server_url: str) -> dict:
     spec = {
         "openapi": "3.0.3",
         "info": {
-            "title": "Revenue Rescue",
+            "title": "LinkRescue",
             "version": __version__,
             "description": (
                 "Agent-native commerce observability: audits, evidence-backed "
@@ -409,7 +409,7 @@ async def health(_: Request) -> JSONResponse:
     return JSONResponse(
         {
             "ok": True,
-            "service": "revenue-rescue",
+            "service": "linkrescue",
             "version": __version__,
             "mcp": "/mcp",
             "rest": "/api/v1",
@@ -427,7 +427,7 @@ async def ready(_: Request) -> JSONResponse:
         return JSONResponse(
             {
                 **not_ready(problems),
-                "service": "revenue-rescue",
+                "service": "linkrescue",
                 "version": __version__,
                 "config": CONFIG.public_status(),
                 "storage": storage,
@@ -437,7 +437,7 @@ async def ready(_: Request) -> JSONResponse:
     return JSONResponse(
         {
             "ok": True,
-            "service": "revenue-rescue",
+            "service": "linkrescue",
             "version": __version__,
             "config": CONFIG.public_status(),
             "storage": storage,
@@ -666,21 +666,31 @@ async def cron_due_monitors(request: Request) -> JSONResponse:
         )
 
     result = await asyncio.to_thread(run_due_monitors, limit=5)
+    try:
+        pruned = await asyncio.to_thread(prune_states_older_than, "audit_jobs")
+    except Exception as exc:
+        pruned = f"error: {type(exc).__name__}"
+    try:
+        reaped = await asyncio.to_thread(reap_orphaned_jobs)
+    except Exception as exc:
+        reaped = f"error: {type(exc).__name__}"
     log_event(
         "cron_due_monitors_completed",
         request_id=rid,
         due_count=result.get("due_count"),
         ran_count=result.get("ran_count"),
+        pruned_audit_jobs=pruned,
+        reaped_jobs=reaped if isinstance(reaped, str) else reaped.get("reaped"),
     )
     return JSONResponse(
-        {**result, "request_id": rid},
+        {**result, "pruned_audit_jobs": pruned, "reaped_jobs": reaped, "request_id": rid},
         headers={"X-Request-ID": rid},
     )
 
 
 async def homepage(_: Request) -> HTMLResponse:
     return HTMLResponse(
-        "<html><body><h1>Revenue Rescue</h1>"
+        "<html><body><h1>LinkRescue</h1>"
         "<p>Agent-native commerce observability.</p>"
         "<ul>"
         "<li>MCP: <code>/mcp</code></li>"

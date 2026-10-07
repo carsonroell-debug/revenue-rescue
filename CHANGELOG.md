@@ -4,6 +4,124 @@ All notable changes to Revenue Rescue should be documented here.
 
 The project follows semantic versioning for public releases.
 
+## [Unreleased] - p1/jobs-cleanup-20261003 (job reaper + dead-code cleanup, NOT merged to main)
+
+### Why this branch exists
+P1 hardening from the senior audit, built on p1/robotstxt-20261003: (a) crash
+recovery for background jobs — stuck queued/running jobs wedged the queue
+silently; (b) dead-code cleanup of three verified-dead items. Nothing here is
+merged; CI runs on push.
+
+### Added
+- **Job reaper (`reap_orphaned_jobs` in `revenuerescue/jobs.py`):** marks jobs
+  stuck in `queued`/`created_at`-stale or `running`/`started_at`-stale past a
+  30-minute threshold (injectable `now`/`threshold_seconds` for tests) as
+  `failed` with a clear "orphaned" reason. No new states introduced; reaped
+  jobs carry no findings (honest-verdict discipline). Every reaped job is
+  logged via `log_event("job_reaped", ...)`. Wired into the existing
+  `/internal/cron/due-monitors` endpoint alongside retention pruning, and
+  reported in its response as `reaped_jobs`. (+6 tests; suite now 66/66)
+
+### Removed
+- `commerce_weight()` from `revenuerescue/commerce.py` — verified zero callers;
+  `extract_commerce_context()` (the used entry point) untouched.
+- Stale `__version__ = "0.1.0"` from `revenuerescue/__init__.py` —
+  `revenuerescue/version.py` (0.4.0) is the single source of truth; everything
+  (server, release_check, tests) already imports from there.
+- Dead `--port 8787` flag from `run.sh` — `server.main()` takes no CLI args and
+  there is no argparse; the flag was silently ignored. Port comes from the
+  `PORT` env var (default 8787) via `RuntimeConfig`; run.sh documents this now.
+
+### What remains (for the next coding agent)
+- Merge order (needs the user's word): audit/p0-20261003 -> p1/robotstxt-20261003
+  -> p1/jobs-cleanup-20261003. Each is a clean fast-forward of the previous.
+
+## [Unreleased] - p1/robotstxt-20261003 (robots.txt enforcement, NOT merged to main)
+
+### Why this branch exists
+P1 review-risk fix from the senior audit: Meta's Connector Policies prohibit
+violating robots.txt, and the crawler didn't check it. Built on
+audit/p0-20261003. Nothing here is merged; CI runs on push.
+
+### Added
+- **robots.txt enforcement:** new `revenuerescue/robots.py` — minimal RFC 9309
+  implementation, stdlib only. Per-host `/robots.txt` fetch (via the
+  SSRF-guarded `safe_get`), in-memory cache (1h success / 5min failure),
+  group selection by most-specific user-agent prefix match against our
+  fetcher UA with `*` fallback, path matching with `*` wildcards and `$`
+  end-anchors, longest-match-wins between Allow/Disallow. Failure semantics:
+  unreachable robots.txt -> ALLOW + log (never fail closed).
+- **Enforcement points:** `pick_pages()` filters out disallowed page URLs
+  (logs skips to stderr); `check_link()` returns early with
+  `"skipped: robots.txt disallows this URL"`, which `verdict()` maps to
+  inconclusive -- a robots exclusion is never a finding, consistent with the
+  honest-verdict engine. (+12 tests; suite now 60/60)
+- `test_pick_pages_prioritizes_commercial_urls` now stubs `robots_allowed`
+  (no live robots.txt fetch in tests -- suite stays hermetic).
+
+### What remains (for the next coding agent)
+- robots.txt P1 is DONE on this branch. Remaining P1s: crash recovery for
+  in-flight background jobs; per-user auth story. P2: truth-set labeling,
+  dead-code cleanup. P0s still parked: public HTTPS hosting, support contact,
+  work email, product URL, privacy/terms home.
+
+## [Unreleased] - audit/p0-20261003 (senior-audit pass, NOT merged to main)
+
+### Why this branch exists
+Post-merge audit of main @ 722dc53 (8 ChatGPT-agent PRs). Verified the Oct-1
+P1s against the real code, fixed the highest-confidence gaps with minimal
+changes, and wrote the /docs/muse/ submission package from the actual
+implementation. Nothing here is merged; CI runs on push.
+
+### Fixed
+- **503 bot-wall false positive (verdict):** `verdict()` had a dead
+  `body_sniff` captcha guard — no caller ever passed a body, so a 503 from a
+  bot-wall host was reported as "destination server error (503)", contradicting
+  the "bot-blocked is never a finding" invariant. 503s from known bot-wall
+  hosts (BOTWALL list) are now inconclusive; genuine 503s elsewhere still
+  report. (`revenuerescue/audit.py`, +2 tests)
+- **Scrapling upgrade could launder a bot-wall into a clean 200:**
+  `_maybe_upgrade_fetch` now rejects upgraded content that is itself a
+  captcha/challenge page and keeps the original response, preserving the
+  "escalation only upgrades fetch success" invariant. (`revenuerescue/audit.py`,
+  +2 tests)
+- **Contract drift:** the `health_check` MCP tool was registered in
+  `server.py` but missing from the canonical `contracts.py` (adapters'
+  parity test couldn't see it). Added to TOOLS.
+
+### Added
+- **Retention enforcement (P2-7):** `storage.prune_states_older_than(kind,
+  max_age_days=90)` — deletes audit-job records older than 90 days on both
+  backends (Postgres `updated_at`, local JSON mtime). Refuses non-`audit_jobs`
+  kinds (monitor configs are user-owned and never auto-pruned). Wired into
+  `POST /internal/cron/due-monitors` so it actually runs. (+3 tests)
+- **/docs/muse/** submission package: CONNECTOR.md, TOOLS.md, ARCHITECTURE.md,
+  SECURITY.md, PRIVACY.md, DATA_FLOW.md, REVIEWER_GUIDE.md, TEST_PLAN.md,
+  SUBMISSION_CHECKLIST.md — all written from the real implementation.
+
+### Fixed (tests)
+- `test_run_audit_persists_structured_report` did a live DNS lookup for
+  example.com (fails under DNS-intercepting sandboxes). Now stubs
+  `validate_public_http_url`. Test suite: 48/48 passing.
+
+### What remains (for the next coding agent)
+- P0: public HTTPS hosting (decision parked by user) — the #1 submission
+  blocker; Meta requires the endpoint live at submission.
+- P0: support contact, work email, product website URL, canonical
+  privacy/terms home (see docs/muse/SUBMISSION_CHECKLIST.md).
+- P1: robots.txt enforcement -- DONE on p1/robotstxt-20261003 (see above).
+- P1: crash recovery for in-flight background jobs (orphaned
+  `running`/`queued` jobs after restart need a reaper).
+- P1: per-user auth story (V1 is a single static Bearer token; fine for
+  single-operator, needs OAuth/API-key issuance for multi-tenant listing).
+- P2: truth-set labeling pass (benchmarks/sample.jsonl has 3 rows;
+  benchmark gates can't run meaningfully yet).
+- P2: dead code cleanup (`commerce.commerce_weight()` uncalled, stale
+  `__version__` in `revenuerescue/__init__.py`, `run.sh --port` silently
+  ignored).
+- P2: fine-grained Postgres tables (architecture doc lists audit_pages,
+  link_checks, findings, monitor_runs — only the two jsonb tables exist).
+
 ## [0.4.0] - 2026-10-02
 
 ### Added
