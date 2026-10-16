@@ -4,5 +4,5 @@ scrapling[fetchers]==0.4.15
 fastmcp==4.0.10
 starlette>=1.0.1,<2
 uvicorn>=0.35,<1
-crawlee[beautifulsoup]==1.10.3
+crawlee[beautifulsoup]==1.10.4
 psycopg[binary]==3.3.6
