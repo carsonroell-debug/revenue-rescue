@@ -7,11 +7,11 @@ dependencies = [
     "beautifulsoup4==4.15.0",
     "requests==2.34.2",
     "scrapling[fetchers]==0.4.15",
-    "fastmcp==4.0.10",
+    "fastmcp==4.1.6",
     "starlette>=1.0.1,<2",
     "uvicorn>=0.35,<1",
     "crawlee[beautifulsoup]==1.10.3",
-    "psycopg[binary]==3.3.6",
+    "psycopg[binary]==3.3.7",
 ]
 
 [tool.vercel]
